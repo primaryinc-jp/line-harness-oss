@@ -7,6 +7,7 @@ on:
     paths:
       - 'apps/web/**'
       - 'packages/shared/**'
+      - 'packages/update-engine/**'
       - '.github/workflows/deploy-cloudflare-admin.yml'
 
 jobs:
@@ -66,7 +67,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @line-crm/shared build
+      - run: pnpm --filter @line-crm/shared --filter @line-harness/update-engine build
 
       - name: Build Admin Panel
         run: pnpm --filter web build

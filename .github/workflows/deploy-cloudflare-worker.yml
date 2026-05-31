@@ -10,6 +10,8 @@ on:
       - 'packages/db/**'
       - 'packages/shared/**'
       - 'packages/line-sdk/**'
+      - 'packages/update-engine/**'
+      - 'scripts/d1-run-migrations.mjs'
       - '.github/workflows/deploy-cloudflare-worker.yml'
 
 jobs:
@@ -71,35 +73,14 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @line-crm/shared --filter @line-crm/line-sdk --filter @line-crm/db build
+      - run: pnpm --filter @line-crm/shared --filter @line-crm/line-sdk --filter @line-crm/db --filter @line-harness/update-engine build
 
       - name: Run pending D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
-        run: |
-          test -n "$CLOUDFLARE_API_TOKEN"
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          test -n "$D1_DATABASE_NAME"
-
-          npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --command \
-            "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-
-          for f in $(ls packages/db/migrations/*.sql | sort); do
-            name=$(basename "$f")
-            applied=$(npx wrangler d1 execute "$D1_DATABASE_NAME" --remote \
-              --command "SELECT name FROM _migrations WHERE name = '${name}'" --json \
-              | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));console.log(d[0]?.results?.length||0)")
-            if [ "$applied" = "0" ]; then
-              echo "Applying: $name"
-              npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --file="$f"
-              npx wrangler d1 execute "$D1_DATABASE_NAME" --remote --command \
-                "INSERT INTO _migrations (name, applied_at) VALUES ('${name}', datetime('now'))"
-            else
-              echo "Skipped: $name"
-            fi
-          done
+        run: node scripts/d1-run-migrations.mjs
 
       - name: Build Worker and LIFF assets
         run: pnpm --filter worker build
