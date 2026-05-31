@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 
-export type ImageUploaderMode = 'url' | 'line-image'
+export type ImageUploaderMode = 'url' | 'line-image' | 'line-sender-icon'
 
 export type ImageUploaderValue =
   | { mode: 'url'; url: string }
@@ -21,6 +21,7 @@ export interface ImageUploaderProps {
  *
  * mode='url' は単一 URL を返す (Event / Staff など)。
  * mode='line-image' は {originalContentUrl, previewImageUrl} を返す (Broadcast / Auto-reply / Template / Chats)。
+ * mode='line-sender-icon' は LINE sender.iconUrl 用に PNG / 1:1 / 1MB 以下へ正規化した URL を返す。
  * 初版は preview = original の同 URL。後段で本格 resize が必要になれば worker 側で対応。
  */
 export default function ImageUploader({ mode, value, onChange, label }: ImageUploaderProps) {
@@ -29,11 +30,56 @@ export default function ImageUploader({ mode, value, onChange, label }: ImageUpl
   const [error, setError] = useState('')
   const [manualUrlMode, setManualUrlMode] = useState(false)
 
+  const normalizeSenderIcon = useCallback(async (file: File): Promise<File> => {
+    const objectUrl = URL.createObjectURL(file)
+    try {
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image()
+        img.onload = () => resolve(img)
+        img.onerror = () => reject(new Error('画像を読み込めませんでした'))
+        img.src = objectUrl
+      })
+
+      const sourceSize = Math.min(image.naturalWidth, image.naturalHeight)
+      const sourceX = Math.floor((image.naturalWidth - sourceSize) / 2)
+      const sourceY = Math.floor((image.naturalHeight - sourceSize) / 2)
+
+      for (const size of [512, 384, 256, 192, 128]) {
+        const canvas = document.createElement('canvas')
+        canvas.width = size
+        canvas.height = size
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('画像を変換できませんでした')
+        ctx.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size)
+
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+        if (!blob) throw new Error('画像を変換できませんでした')
+        if (blob.size <= 1024 * 1024) {
+          const baseName = file.name.replace(/\.[^.]*$/, '') || 'sender-icon'
+          return new File([blob], `${baseName}.png`, { type: 'image/png' })
+        }
+      }
+    } finally {
+      URL.revokeObjectURL(objectUrl)
+    }
+
+    throw new Error('1MB 以下の PNG に変換できませんでした')
+  }, [])
+
   const upload = useCallback(
     async (file: File) => {
       if (!file.type.startsWith('image/')) {
         setError('画像ファイルのみアップロードできます')
         return
+      }
+      let uploadFile = file
+      if (mode === 'line-sender-icon') {
+        try {
+          uploadFile = await normalizeSenderIcon(file)
+        } catch (err) {
+          setError(err instanceof Error ? err.message : '画像を変換できませんでした')
+          return
+        }
       }
       if (mode === 'line-image' && !['image/jpeg', 'image/png'].includes(file.type)) {
         setError('LINE 送信用は JPEG または PNG のみ対応')
@@ -43,23 +89,23 @@ export default function ImageUploader({ mode, value, onChange, label }: ImageUpl
         setError('LINE 送信用は 1MB 以下にしてください (preview サイズ制限)')
         return
       }
-      if (file.size > 10 * 1024 * 1024) {
+      if (uploadFile.size > 10 * 1024 * 1024) {
         setError('10MB 以下にしてください')
         return
       }
       setBusy(true)
       setError('')
       try {
-        const res = await api.uploads.image(file)
+        const res = await api.uploads.image(uploadFile)
         if (!res.success) {
           setError(res.error ?? 'アップロード失敗')
           return
         }
         const url = res.data.url
-        if (mode === 'url') {
-          onChange({ mode: 'url', url })
-        } else {
+        if (mode === 'line-image') {
           onChange({ mode: 'line-image', originalContentUrl: url, previewImageUrl: url })
+        } else {
+          onChange({ mode: 'url', url })
         }
       } catch {
         setError('アップロード失敗')
@@ -67,7 +113,7 @@ export default function ImageUploader({ mode, value, onChange, label }: ImageUpl
         setBusy(false)
       }
     },
-    [mode, onChange],
+    [mode, normalizeSenderIcon, onChange],
   )
 
   const handleFiles = useCallback(

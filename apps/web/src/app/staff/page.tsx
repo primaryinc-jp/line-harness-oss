@@ -256,7 +256,7 @@ export default function StaffPage() {
               </div>
             </div>
             <ImageUploader
-              mode="url"
+              mode="line-sender-icon"
               value={imageValue(formIconUrl)}
               onChange={(v) => setFormIconUrl(v?.mode === 'url' ? v.url : '')}
               label="アイコン画像"
@@ -341,7 +341,7 @@ export default function StaffPage() {
                         {editingIconId === member.id ? (
                           <div className="mt-2 w-72 max-w-[calc(100vw-3rem)] space-y-2">
                             <ImageUploader
-                              mode="url"
+                              mode="line-sender-icon"
                               value={imageValue(editIconUrl)}
                               onChange={(v) => setEditIconUrl(v?.mode === 'url' ? v.url : '')}
                             />
