@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import Header from '@/components/layout/header'
 import { fetchApi } from '@/lib/api'
+import ImageUploader from '@/components/shared/image-uploader'
 import type { ApiResponse } from '@line-crm/shared'
 import type { StaffMember } from '@line-crm/shared'
 
@@ -26,6 +27,10 @@ function RoleBadge({ role }: { role: string }) {
 function maskKey(key: string): string {
   if (!key || key.length <= 8) return '••••••••'
   return key.slice(0, 4) + '••••••••' + key.slice(-4)
+}
+
+function imageValue(url: string) {
+  return url ? { mode: 'url' as const, url } : null
 }
 
 export default function StaffPage() {
@@ -145,6 +150,24 @@ export default function StaffPage() {
     }
   }
 
+  const handleUpdateIcon = async (member: StaffMember, iconUrl: string | null) => {
+    try {
+      const res = await fetchApi<ApiResponse<StaffMember>>(`/api/staff/${member.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ iconUrl }),
+      })
+      if (!res.success) {
+        setError(res.error ?? 'アイコン更新に失敗しました')
+        return
+      }
+      setEditingIconId(null)
+      setEditIconUrl('')
+      await loadMembers()
+    } catch {
+      setError('アイコン更新に失敗しました')
+    }
+  }
+
   const handleCopy = async () => {
     if (!newKey) return
     await navigator.clipboard.writeText(newKey.apiKey)
@@ -198,7 +221,7 @@ export default function StaffPage() {
         <div className="mb-6 p-5 bg-white border border-gray-200 rounded-lg shadow-sm">
           <h2 className="text-sm font-semibold text-gray-900 mb-4">新しいスタッフを追加</h2>
           <form onSubmit={handleCreate} className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">名前 *</label>
                 <input
@@ -221,16 +244,6 @@ export default function StaffPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">アイコン画像URL</label>
-                <input
-                  type="url"
-                  value={formIconUrl}
-                  onChange={(e) => setFormIconUrl(e.target.value)}
-                  placeholder="https://example.com/icon.png"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
-                />
-              </div>
-              <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">ロール *</label>
                 <select
                   value={formRole}
@@ -242,6 +255,12 @@ export default function StaffPage() {
                 </select>
               </div>
             </div>
+            <ImageUploader
+              mode="url"
+              value={imageValue(formIconUrl)}
+              onChange={(v) => setFormIconUrl(v?.mode === 'url' ? v.url : '')}
+              label="アイコン画像"
+            />
             {formError && (
               <p className="text-sm text-red-600">{formError}</p>
             )}
@@ -320,30 +339,26 @@ export default function StaffPage() {
                       <div>
                         <span className="font-medium text-gray-900">{member.name}</span>
                         {editingIconId === member.id ? (
-                          <div className="flex items-center gap-1 mt-1">
-                            <input
-                              type="url"
-                              value={editIconUrl}
-                              onChange={(e) => setEditIconUrl(e.target.value)}
-                              placeholder="https://..."
-                              className="w-48 px-2 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-green-500"
+                          <div className="mt-2 w-72 max-w-[calc(100vw-3rem)] space-y-2">
+                            <ImageUploader
+                              mode="url"
+                              value={imageValue(editIconUrl)}
+                              onChange={(v) => setEditIconUrl(v?.mode === 'url' ? v.url : '')}
                             />
-                            <button
-                              onClick={async () => {
-                                await fetchApi(`/api/staff/${member.id}`, {
-                                  method: 'PATCH',
-                                  body: JSON.stringify({ iconUrl: editIconUrl || null }),
-                                })
-                                setEditingIconId(null)
-                                await loadMembers()
-                              }}
-                              className="px-1.5 py-0.5 text-xs text-green-700 bg-green-50 rounded hover:bg-green-100"
-                            >
-                              保存
-                            </button>
-                            <button onClick={() => setEditingIconId(null)} className="px-1.5 py-0.5 text-xs text-gray-500 rounded hover:bg-gray-100">
-                              取消
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => void handleUpdateIcon(member, editIconUrl || null)}
+                                className="px-1.5 py-0.5 text-xs text-green-700 bg-green-50 rounded hover:bg-green-100"
+                              >
+                                保存
+                              </button>
+                              <button
+                                onClick={() => { setEditingIconId(null); setEditIconUrl('') }}
+                                className="px-1.5 py-0.5 text-xs text-gray-500 rounded hover:bg-gray-100"
+                              >
+                                取消
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <button
