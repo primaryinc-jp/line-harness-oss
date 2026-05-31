@@ -10,8 +10,50 @@ on:
       - '.github/workflows/deploy-cloudflare-admin.yml'
 
 jobs:
+  preflight:
+    if: github.repository != 'Shudesu/line-harness-oss'
+    runs-on: ubuntu-latest
+    env:
+      LINE_HARNESS_CLOUDFLARE_DEPLOY: ${{ vars.LINE_HARNESS_CLOUDFLARE_DEPLOY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+    steps:
+      - name: Check deploy configuration
+        run: |
+          missing=0
+          {
+            echo "## Cloudflare Admin deploy preflight"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          check_required() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "- Missing: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+              missing=1
+            fi
+          }
+
+          if [ "$LINE_HARNESS_CLOUDFLARE_DEPLOY" != "true" ]; then
+            echo "- Missing: \`LINE_HARNESS_CLOUDFLARE_DEPLOY=true\` repository variable" >> "$GITHUB_STEP_SUMMARY"
+            missing=1
+          fi
+          check_required "CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_API_TOKEN"
+          check_required "CLOUDFLARE_ACCOUNT_ID" "$CLOUDFLARE_ACCOUNT_ID"
+          check_required "NEXT_PUBLIC_API_URL" "$NEXT_PUBLIC_API_URL"
+
+          if [ "$missing" = "1" ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "Deploy is skipped until the missing repository Actions settings are configured." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "All required Admin deploy settings are configured." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   deploy:
     if: github.repository != 'Shudesu/line-harness-oss' && vars.LINE_HARNESS_CLOUDFLARE_DEPLOY == 'true'
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
