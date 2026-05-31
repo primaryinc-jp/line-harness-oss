@@ -58,7 +58,7 @@ export async function resolveMessageSender(
   }
 
   const selectedStaffId =
-    selection.senderStaffId ?? (selection.senderMode === 'self' ? currentStaff.id : null);
+    selection.senderStaffId ?? currentStaff.id;
 
   if (!selectedStaffId) {
     return { staffId: null, name: null, iconUrl: null };

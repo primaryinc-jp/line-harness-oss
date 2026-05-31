@@ -37,6 +37,21 @@ describe('resolveMessageSender', () => {
     });
   });
 
+  it('defaults to the authenticated staff member', async () => {
+    await expect(
+      resolveMessageSender(
+        dbWithStaff({ id: 'staff-1', name: 'Alice', icon_url: null, is_active: 1 }),
+        { id: 'staff-1', name: 'Alice', role: 'staff' },
+        {},
+      ),
+    ).resolves.toEqual({
+      lineSender: { name: 'Alice' },
+      staffId: 'staff-1',
+      name: 'Alice',
+      iconUrl: null,
+    });
+  });
+
   it('allows owners to select another active staff member', async () => {
     await expect(
       resolveMessageSender(

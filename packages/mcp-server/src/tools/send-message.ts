@@ -35,7 +35,7 @@ export function registerSendMessage(server: McpServer): void {
       senderMode: z
         .enum(["official", "self"])
         .optional()
-        .describe("Sender identity mode. Use 'self' to send as the authenticated staff, or 'official' for the LINE official account."),
+        .describe("Sender identity mode. Omit to send as the authenticated staff. Use 'official' for the LINE official account."),
       senderStaffId: z
         .string()
         .optional()
