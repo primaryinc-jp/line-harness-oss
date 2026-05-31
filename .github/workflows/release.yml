@@ -42,6 +42,7 @@ permissions:
 
 jobs:
   release:
+    if: github.repository == 'Shudesu/line-harness-oss'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

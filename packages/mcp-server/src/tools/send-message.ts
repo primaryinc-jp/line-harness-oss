@@ -32,22 +32,16 @@ export function registerSendMessage(server: McpServer): void {
         .describe(
           "Mark as test send. Prepends 【テスト配信】 to text messages, adds test banner to flex messages.",
         ),
-      senderName: z
-        .string()
-        .max(20)
+      senderMode: z
+        .enum(["official", "self"])
         .optional()
-        .describe(
-          "Display name shown as the message sender (max 20 chars). Use for staff-specific messages, e.g. 'スタッフ田中'.",
-        ),
-      senderIconUrl: z
+        .describe("Sender identity mode. Use 'self' to send as the authenticated staff, or 'official' for the LINE official account."),
+      senderStaffId: z
         .string()
-        .url()
         .optional()
-        .describe(
-          "HTTPS URL of the sender's icon image (PNG recommended, max 1MB).",
-        ),
+        .describe("Staff ID to send as. Only owner credentials can select another staff member."),
     },
-    async ({ friendId, content, messageType, altText, isTest, senderName, senderIconUrl }) => {
+    async ({ friendId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
       try {
         const client = getClient();
 
@@ -85,13 +79,12 @@ export function registerSendMessage(server: McpServer): void {
           `DM to ${friendId.slice(0, 8)}`,
         );
 
-        const sender = senderName ? { name: senderName, ...(senderIconUrl ? { iconUrl: senderIconUrl } : {}) } : undefined;
         const result = await client.friends.sendMessage(
           friendId,
           trackedContent,
           messageType,
           altText,
-          sender,
+          senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined,
         );
         return {
           content: [

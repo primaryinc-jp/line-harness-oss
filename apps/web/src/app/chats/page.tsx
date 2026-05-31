@@ -48,6 +48,7 @@ interface StaffInfo {
 }
 
 type SenderMode = 'official' | 'self' | string // string = staff id for owner selecting others
+type SenderRequest = { senderMode: 'official' | 'self' } | { senderStaffId: string }
 
 type StatusFilter = 'all' | 'unread' | 'in_progress' | 'resolved'
 
@@ -161,10 +162,10 @@ function DirectMessagePanel({ friendId, friend, onBack, onSent }: {
     setSending(true)
     try {
       const meRes = await api.staff.me().catch(() => null)
-      const sender = meRes?.success && meRes.data.name ? { name: meRes.data.name } : undefined
+      const sender = meRes?.success && meRes.data.name ? { senderMode: 'self' as const } : undefined
       await fetchApi(`/api/friends/${friendId}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ content: message, messageType: 'text', ...(sender ? { sender } : {}) }),
+        body: JSON.stringify({ content: message, messageType: 'text', ...(sender ?? {}) }),
       })
       setMessages((prev) => [...prev, {
         id: crypto.randomUUID(),
@@ -557,15 +558,15 @@ export default function ChatsPage() {
     }
   }, [showLoadingIndicator, loadingSeconds])
 
-  const buildSender = useCallback((): { name: string; iconUrl?: string } | undefined => {
-    if (senderMode === 'official') return undefined
+  const buildSender = useCallback((): SenderRequest | undefined => {
+    if (senderMode === 'official') return { senderMode: 'official' }
     if (senderMode === 'self' && currentStaff) {
-      return { name: currentStaff.name, ...(currentStaff.iconUrl ? { iconUrl: currentStaff.iconUrl } : {}) }
+      return { senderMode: 'self' }
     }
     // owner selecting a specific staff member
     const selected = staffList.find((s) => s.id === senderMode)
     if (selected) {
-      return { name: selected.name, ...(selected.iconUrl ? { iconUrl: selected.iconUrl } : {}) }
+      return { senderStaffId: selected.id }
     }
     return undefined
   }, [senderMode, currentStaff, staffList])
@@ -585,7 +586,7 @@ export default function ChatsPage() {
           originalContentUrl: pendingImage.originalContentUrl,
           previewImageUrl: pendingImage.previewImageUrl,
         })
-        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload, ...(sender ? { sender } : {}) })
+        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload, ...(sender ?? {}) })
         setPendingImage(null)
         // Optimistic update for image
         setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
@@ -631,7 +632,7 @@ export default function ChatsPage() {
       // --- Text send path (runs independently — both paths execute when both image and text are present) ---
       if (messageContent.trim()) {
         const content = messageContent.trim()
-        await api.chats.send(sendingChatId, { content, ...(sender ? { sender } : {}) })
+        await api.chats.send(sendingChatId, { content, ...(sender ?? {}) })
         setMessageContent('')
         // Optimistic update: append message locally instead of refetching (prevents scroll jump / full reload feel)
         // Only mutate chatDetail if it still corresponds to the chat we just sent to

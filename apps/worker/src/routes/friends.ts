@@ -14,6 +14,7 @@ import type { Friend as DbFriend, Tag as DbTag } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
+import { MessageSenderError, resolveMessageSender, type SenderSelection } from '../utils/message-sender.js';
 
 const friends = new Hono<Env>();
 
@@ -542,8 +543,7 @@ friends.post('/api/friends/:id/messages', async (c) => {
       messageType?: string;
       content: string;
       altText?: string;
-      sender?: { name: string; iconUrl?: string };
-    }>();
+    } & SenderSelection>();
 
     if (!body.content) {
       return c.json({ success: false, error: 'content is required' }, 400);
@@ -565,6 +565,7 @@ friends.post('/api/friends/:id/messages', async (c) => {
     }
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
+    const sender = await resolveMessageSender(db, c.get('staff'), body);
 
     // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
     const { autoTrackContent } = await import('../services/auto-track.js');
@@ -574,7 +575,7 @@ friends.post('/api/friends/:id/messages', async (c) => {
     );
 
     const message = buildMessage(tracked.messageType, tracked.content, body.altText);
-    await lineClient.pushMessage(friend.line_user_id, [message], body.sender);
+    await lineClient.pushMessage(friend.line_user_id, [message], sender);
 
     // Log outgoing message
     const logId = crypto.randomUUID();
@@ -588,6 +589,9 @@ friends.post('/api/friends/:id/messages', async (c) => {
 
     return c.json({ success: true, data: { messageId: logId } });
   } catch (err) {
+    if (err instanceof MessageSenderError) {
+      return c.json({ success: false, error: err.message }, err.status as 400 | 403 | 404);
+    }
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('POST /api/friends/:id/messages error:', errMsg);
     return c.json({ success: false, error: errMsg }, 500);

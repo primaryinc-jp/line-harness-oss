@@ -11,3 +11,5 @@
 - `upstream` へ push しないでください。
 - `upstream` に Pull Request を作成しないでください。
 - 変更の push / PR 作成は、明示がない限り `origin` 側だけで行ってください。
+- `v*.*.*` 形式のタグ / GitHub Release は upstream の名前空間です。`origin` 側では作成しないでください。
+- `origin` 側のリリースは、`origin/main` へのマージと Cloudflare deploy workflow による社内環境反映を指します。

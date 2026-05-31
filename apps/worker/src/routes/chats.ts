@@ -15,6 +15,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { MessageSenderError, resolveMessageSender, type SenderSelection } from '../utils/message-sender.js';
 
 const chats = new Hono<Env>();
 
@@ -520,7 +521,7 @@ chats.post('/api/chats/:id/send', async (c) => {
     const chat = await resolveOrCreateChat(c.env.DB, chatId);
     if (!chat) return c.json({ success: false, error: 'Chat not found' }, 404);
 
-    const body = await c.req.json<{ messageType?: string; content: string; sender?: { name: string; iconUrl?: string } }>();
+    const body = await c.req.json<{ messageType?: string; content: string } & SenderSelection>();
     if (!body.content) return c.json({ success: false, error: 'content is required' }, 400);
 
     const { friend, accessToken } = await resolveFriendAndAccessToken(
@@ -534,12 +535,13 @@ chats.post('/api/chats/:id/send', async (c) => {
     const { LineClient } = await import('@line-crm/line-sdk');
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
+    const sender = await resolveMessageSender(c.env.DB, c.get('staff'), body);
 
     if (messageType === 'text') {
-      await lineClient.pushTextMessage(friend.line_user_id, body.content, body.sender);
+      await lineClient.pushTextMessage(friend.line_user_id, body.content, sender);
     } else if (messageType === 'flex') {
       const contents = JSON.parse(body.content);
-      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents, body.sender);
+      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents, sender);
     } else if (messageType === 'image') {
       const parsed = JSON.parse(body.content) as {
         originalContentUrl: string;
@@ -549,7 +551,7 @@ chats.post('/api/chats/:id/send', async (c) => {
         friend.line_user_id,
         parsed.originalContentUrl,
         parsed.previewImageUrl,
-        body.sender,
+        sender,
       );
     }
 
@@ -565,6 +567,9 @@ chats.post('/api/chats/:id/send', async (c) => {
 
     return c.json({ success: true, data: { sent: true, messageId: logId } });
   } catch (err) {
+    if (err instanceof MessageSenderError) {
+      return c.json({ success: false, error: err.message }, err.status as 400 | 403 | 404);
+    }
     console.error('POST /api/chats/:id/send error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }

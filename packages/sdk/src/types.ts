@@ -30,6 +30,11 @@ export interface MessageSender {
   name: string
   iconUrl?: string
 }
+
+export interface MessageSenderSelection {
+  senderMode?: 'official' | 'self'
+  senderStaffId?: string | null
+}
 export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'sent'
 
 // ─── Friend ─────────────────────────────────────────────
