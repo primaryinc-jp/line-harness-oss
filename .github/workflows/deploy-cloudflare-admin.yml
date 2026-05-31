@@ -73,6 +73,7 @@ jobs:
         run: pnpm --filter web build
         env:
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_UPDATE_BANNER_ENABLED: 'false'
 
       - name: Deploy to Cloudflare Pages
         env:

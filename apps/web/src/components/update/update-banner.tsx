@@ -16,10 +16,14 @@ type Status =
   | { kind: 'fork'; reason: string; version: string }
   | { kind: 'upgrade'; current: string; target: ReleaseEntry }
 
+const UPDATE_BANNER_ENABLED =
+  process.env.NEXT_PUBLIC_UPDATE_BANNER_ENABLED !== 'false'
+
 export function UpdateBanner() {
   const [status, setStatus] = useState<Status>({ kind: 'loading' })
 
   useEffect(() => {
+    if (!UPDATE_BANNER_ENABLED) return
     let cancelled = false
     ;(async () => {
       try {
@@ -59,6 +63,7 @@ export function UpdateBanner() {
     }
   }, [])
 
+  if (!UPDATE_BANNER_ENABLED) return null
   if (status.kind === 'loading') return null
 
   if (status.kind === 'latest') {
