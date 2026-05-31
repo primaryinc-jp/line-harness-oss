@@ -655,7 +655,15 @@ export const api = {
       )
     },
     get: (id: string) =>
-      fetchApi<ApiResponse<Chat & { messages?: { id: string; content: string; senderType: string; createdAt: string }[] }>>(
+      fetchApi<ApiResponse<Chat & { messages?: {
+        id: string
+        content: string
+        senderType?: string
+        senderStaffId?: string | null
+        senderName?: string | null
+        senderIconUrl?: string | null
+        createdAt: string
+      }[] }>>(
         `/api/chats/${id}`,
       ),
     create: (data: { friendId: string; operatorId?: string | null }) =>

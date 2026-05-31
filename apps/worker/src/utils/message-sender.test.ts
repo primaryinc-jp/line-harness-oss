@@ -19,7 +19,7 @@ describe('resolveMessageSender', () => {
         { id: 'staff-1', name: 'Alice', role: 'staff' },
         { senderMode: 'official' },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ staffId: null, name: null, iconUrl: null });
   });
 
   it('resolves self from the staff table', async () => {
@@ -29,7 +29,12 @@ describe('resolveMessageSender', () => {
         { id: 'staff-1', name: 'Alice', role: 'staff' },
         { senderMode: 'self' },
       ),
-    ).resolves.toEqual({ name: 'Alice', iconUrl: 'https://example.com/a.png' });
+    ).resolves.toEqual({
+      lineSender: { name: 'Alice', iconUrl: 'https://example.com/a.png' },
+      staffId: 'staff-1',
+      name: 'Alice',
+      iconUrl: 'https://example.com/a.png',
+    });
   });
 
   it('allows owners to select another active staff member', async () => {
@@ -39,7 +44,12 @@ describe('resolveMessageSender', () => {
         { id: 'owner-1', name: 'Owner', role: 'owner' },
         { senderStaffId: 'staff-2' },
       ),
-    ).resolves.toEqual({ name: 'Bob' });
+    ).resolves.toEqual({
+      lineSender: { name: 'Bob' },
+      staffId: 'staff-2',
+      name: 'Bob',
+      iconUrl: null,
+    });
   });
 
   it('rejects non-owners selecting another staff member', async () => {

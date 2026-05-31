@@ -32,6 +32,18 @@ function serializeStaff(row: StaffMember, masked = true) {
   };
 }
 
+function validateStaffIconUrl(iconUrl: string | null | undefined): string | null | undefined {
+  if (iconUrl === undefined) return undefined;
+  if (iconUrl === null || iconUrl === '') return null;
+  try {
+    const parsed = new URL(iconUrl);
+    if (parsed.protocol !== 'https:') return undefined;
+  } catch {
+    return undefined;
+  }
+  return iconUrl;
+}
+
 // GET /api/staff/me — any authenticated user (MUST be before /:id)
 staff.get('/api/staff/me', async (c) => {
   try {
@@ -112,11 +124,16 @@ staff.post('/api/staff', requireRole('owner'), async (c) => {
       return c.json({ success: false, error: 'role must be owner, admin, or staff' }, 400);
     }
 
+    const iconUrl = validateStaffIconUrl(body.iconUrl);
+    if (iconUrl === undefined && body.iconUrl !== undefined) {
+      return c.json({ success: false, error: 'iconUrl must be an HTTPS URL' }, 400);
+    }
+
     const member = await createStaffMember(c.env.DB, {
       name: body.name,
       email: body.email ?? null,
       role: body.role as 'owner' | 'admin' | 'staff',
-      icon_url: body.iconUrl ?? null,
+      icon_url: iconUrl ?? null,
     });
 
     // Return full (unmasked) API key one-time
@@ -161,12 +178,17 @@ staff.patch('/api/staff/:id', requireRole('owner'), async (c) => {
       }
     }
 
+    const iconUrl = validateStaffIconUrl(body.iconUrl);
+    if (iconUrl === undefined && body.iconUrl !== undefined) {
+      return c.json({ success: false, error: 'iconUrl must be an HTTPS URL' }, 400);
+    }
+
     const updated = await updateStaffMember(c.env.DB, id, {
       name: body.name,
       email: body.email,
       role: body.role as 'owner' | 'admin' | 'staff' | undefined,
       is_active: body.isActive !== undefined ? (body.isActive ? 1 : 0) : undefined,
-      icon_url: body.iconUrl !== undefined ? body.iconUrl : undefined,
+      icon_url: iconUrl,
     });
 
     if (!updated) {

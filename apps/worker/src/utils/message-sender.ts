@@ -14,6 +14,13 @@ export type SenderSelection = {
   senderStaffId?: string | null;
 };
 
+export type ResolvedMessageSender = {
+  lineSender?: MessageSender;
+  staffId: string | null;
+  name: string | null;
+  iconUrl: string | null;
+};
+
 export class MessageSenderError extends Error {
   constructor(
     public readonly status: number,
@@ -45,23 +52,29 @@ export async function resolveMessageSender(
   db: D1Database,
   currentStaff: StaffContext,
   selection: SenderSelection,
-): Promise<MessageSender | undefined> {
+): Promise<ResolvedMessageSender> {
   if (selection.senderMode === 'official') {
-    return undefined;
+    return { staffId: null, name: null, iconUrl: null };
   }
 
   const selectedStaffId =
     selection.senderStaffId ?? (selection.senderMode === 'self' ? currentStaff.id : null);
 
   if (!selectedStaffId) {
-    return undefined;
+    return { staffId: null, name: null, iconUrl: null };
   }
 
   if (selectedStaffId === 'env-owner') {
     if (currentStaff.id !== 'env-owner') {
       throw new MessageSenderError(403, 'only env owner can send as env owner');
     }
-    return validateSender({ name: currentStaff.name });
+    const lineSender = validateSender({ name: currentStaff.name });
+    return {
+      lineSender,
+      staffId: 'env-owner',
+      name: lineSender.name,
+      iconUrl: lineSender.iconUrl ?? null,
+    };
   }
 
   if (currentStaff.role !== 'owner' && selectedStaffId !== currentStaff.id) {
@@ -73,8 +86,14 @@ export async function resolveMessageSender(
     throw new MessageSenderError(404, 'sender staff not found or inactive');
   }
 
-  return validateSender({
+  const lineSender = validateSender({
     name: selectedStaff.name,
     ...(selectedStaff.icon_url ? { iconUrl: selectedStaff.icon_url } : {}),
   });
+  return {
+    lineSender,
+    staffId: selectedStaff.id,
+    name: lineSender.name,
+    iconUrl: lineSender.iconUrl ?? null,
+  };
 }

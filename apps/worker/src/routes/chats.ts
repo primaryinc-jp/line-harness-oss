@@ -403,7 +403,7 @@ chats.get('/api/chats/:id', async (c) => {
     // 現状の最重量ユーザー(481件)の2倍バッファ。これ以上の履歴はページング未実装（Phase 2 TODO）。
     const messages = await c.env.DB
       .prepare(
-        `SELECT id, friend_id, direction, message_type, content, created_at
+        `SELECT id, friend_id, direction, message_type, content, sender_staff_id, sender_name, sender_icon_url, created_at
          FROM messages_log
          WHERE friend_id = ? AND (delivery_type IS NULL OR delivery_type != 'test')
          ORDER BY created_at DESC LIMIT 1000`,
@@ -429,6 +429,9 @@ chats.get('/api/chats/:id', async (c) => {
           direction: m.direction,
           messageType: m.message_type,
           content: m.content,
+          senderStaffId: m.sender_staff_id ?? null,
+          senderName: m.sender_name ?? null,
+          senderIconUrl: m.sender_icon_url ?? null,
           createdAt: m.created_at,
         })),
       },
@@ -538,10 +541,10 @@ chats.post('/api/chats/:id/send', async (c) => {
     const sender = await resolveMessageSender(c.env.DB, c.get('staff'), body);
 
     if (messageType === 'text') {
-      await lineClient.pushTextMessage(friend.line_user_id, body.content, sender);
+      await lineClient.pushTextMessage(friend.line_user_id, body.content, sender.lineSender);
     } else if (messageType === 'flex') {
       const contents = JSON.parse(body.content);
-      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents, sender);
+      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents, sender.lineSender);
     } else if (messageType === 'image') {
       const parsed = JSON.parse(body.content) as {
         originalContentUrl: string;
@@ -551,15 +554,15 @@ chats.post('/api/chats/:id/send', async (c) => {
         friend.line_user_id,
         parsed.originalContentUrl,
         parsed.previewImageUrl,
-        sender,
+        sender.lineSender,
       );
     }
 
     // メッセージログに記録
     const logId = crypto.randomUUID();
     await c.env.DB
-      .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, created_at) VALUES (?, ?, 'outgoing', ?, ?, 'manual', ?)`)
-      .bind(logId, friend.id, messageType, body.content, jstNow())
+      .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, sender_staff_id, sender_name, sender_icon_url, created_at) VALUES (?, ?, 'outgoing', ?, ?, 'manual', ?, ?, ?, ?)`)
+      .bind(logId, friend.id, messageType, body.content, sender.staffId, sender.name, sender.iconUrl, jstNow())
       .run();
 
     // チャットの最終メッセージ日時を更新（chat.id を直接使う — friend_id で呼ばれても resolveOrCreateChat 済み）

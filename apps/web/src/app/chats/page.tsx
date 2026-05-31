@@ -30,6 +30,9 @@ interface ChatMessage {
   direction: 'incoming' | 'outgoing'
   messageType: string
   content: string
+  senderStaffId?: string | null
+  senderName?: string | null
+  senderIconUrl?: string | null
   createdAt: string
 }
 
@@ -571,6 +574,18 @@ export default function ChatsPage() {
     return undefined
   }, [senderMode, currentStaff, staffList])
 
+  const buildOptimisticSender = useCallback((): Pick<ChatMessage, 'senderStaffId' | 'senderName' | 'senderIconUrl'> => {
+    if (senderMode === 'official') return { senderStaffId: null, senderName: null, senderIconUrl: null }
+    if (senderMode === 'self' && currentStaff) {
+      return { senderStaffId: currentStaff.id, senderName: currentStaff.name, senderIconUrl: currentStaff.iconUrl }
+    }
+    const selected = staffList.find((s) => s.id === senderMode)
+    if (selected) {
+      return { senderStaffId: selected.id, senderName: selected.name, senderIconUrl: selected.iconUrl }
+    }
+    return { senderStaffId: null, senderName: null, senderIconUrl: null }
+  }, [senderMode, currentStaff, staffList])
+
   const handleSendMessage = async () => {
     if (!selectedChatId || sending || sendLockRef.current) return
     if (!messageContent.trim() && !pendingImage) return
@@ -580,6 +595,7 @@ export default function ChatsPage() {
     try {
       const now = new Date().toISOString()
       const sender = buildSender()
+      const optimisticSender = buildOptimisticSender()
       // --- Image send path (runs first when image is present) ---
       if (pendingImage && pendingImage.mode === 'line-image') {
         const imgPayload = JSON.stringify({
@@ -600,6 +616,7 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'image',
               content: imgPayload,
+              ...optimisticSender,
               createdAt: now,
             },
           ],
@@ -647,6 +664,7 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'text',
               content,
+              ...optimisticSender,
               createdAt: now,
             },
           ],
@@ -1002,6 +1020,14 @@ export default function ChatsPage() {
                           )}
 
                           <div className={`flex flex-col ${isOutgoing ? 'items-end' : 'items-start'}`}>
+                            {isOutgoing && msg.senderName && (
+                              <div className="mb-1 flex items-center gap-1.5 text-[11px] text-white/70">
+                                {msg.senderIconUrl && (
+                                  <img src={msg.senderIconUrl} alt="" className="w-4 h-4 rounded-full object-cover" />
+                                )}
+                                <span>{msg.senderName}</span>
+                              </div>
+                            )}
                             {/* メッセージバブル */}
                             <div
                               className={`max-w-[320px] px-3 py-2 text-sm break-words whitespace-pre-wrap ${
