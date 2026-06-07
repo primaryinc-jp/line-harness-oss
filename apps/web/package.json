@@ -1,9 +1,10 @@
 {
   "name": "web",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
+    "test": "vitest run --config vitest.config.ts",
     "build": "next build",
     "start": "next start"
   },
