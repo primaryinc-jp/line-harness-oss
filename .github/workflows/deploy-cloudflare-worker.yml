@@ -24,6 +24,9 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      WORKER_URL: ${{ secrets.WORKER_URL || secrets.NEXT_PUBLIC_API_URL }}
+      ADMIN_ORIGIN: ${{ secrets.ADMIN_ORIGIN }}
+      ADMIN_ALLOW_CROSS_SITE: ${{ secrets.ADMIN_ALLOW_CROSS_SITE }}
     steps:
       - name: Check deploy configuration
         run: |
@@ -50,6 +53,9 @@ jobs:
           check_required "CLOUDFLARE_ACCOUNT_ID" "$CLOUDFLARE_ACCOUNT_ID"
           check_required "D1_DATABASE_NAME" "$D1_DATABASE_NAME"
           check_required "D1_DATABASE_ID" "$D1_DATABASE_ID"
+          check_required "WORKER_URL" "$WORKER_URL"
+          check_required "ADMIN_ORIGIN" "$ADMIN_ORIGIN"
+          check_required "ADMIN_ALLOW_CROSS_SITE" "$ADMIN_ALLOW_CROSS_SITE"
 
           if [ "$missing" = "1" ]; then
             echo >> "$GITHUB_STEP_SUMMARY"
@@ -111,3 +117,20 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
           command: deploy --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
+
+      - name: Sync admin auth Worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_NAME: ${{ vars.WORKER_NAME || 'your-worker-name' }}
+          WORKER_URL: ${{ secrets.WORKER_URL || secrets.NEXT_PUBLIC_API_URL }}
+          ADMIN_ORIGIN: ${{ secrets.ADMIN_ORIGIN }}
+          ADMIN_ALLOW_CROSS_SITE: ${{ secrets.ADMIN_ALLOW_CROSS_SITE }}
+        run: |
+          test -n "$WORKER_URL"
+          test -n "$ADMIN_ORIGIN"
+          test -n "$ADMIN_ALLOW_CROSS_SITE"
+          cd apps/worker
+          printf '%s' "$WORKER_URL" | npx wrangler secret put WORKER_URL --name "$WORKER_NAME"
+          printf '%s' "$ADMIN_ORIGIN" | npx wrangler secret put ADMIN_ORIGIN --name "$WORKER_NAME"
+          printf '%s' "$ADMIN_ALLOW_CROSS_SITE" | npx wrangler secret put ADMIN_ALLOW_CROSS_SITE --name "$WORKER_NAME"
