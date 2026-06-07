@@ -50,7 +50,9 @@
     "042_tracked_links_og.sql",
     "043_events_og.sql",
     "044_forms_og.sql",
-    "045_menus_auto_tag.sql"
+    "045_menus_auto_tag.sql",
+    "046_staff_icon_url.sql",
+    "900_primaryinc_message_sender_audit.sql"
   ],
-  "migrationCount": 51
+  "migrationCount": 53
 }
