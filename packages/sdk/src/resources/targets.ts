@@ -24,6 +24,9 @@ export class TargetsResource {
     if (params?.type) query.set('type', params.type)
     if (params?.lineAccountId) query.set('lineAccountId', params.lineAccountId)
     if (params?.includeInactive) query.set('includeInactive', 'true')
+    for (const [key, value] of Object.entries(params?.metadata ?? {})) {
+      query.set(`metadata.${key}`, value)
+    }
     if (params?.limit !== undefined) query.set('limit', String(params.limit))
     if (params?.offset !== undefined) query.set('offset', String(params.offset))
     const qs = query.toString()

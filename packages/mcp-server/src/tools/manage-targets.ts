@@ -22,6 +22,12 @@ export function registerManageTargets(server: McpServer): void {
         .record(z.unknown())
         .optional()
         .describe("Metadata fields to merge (for 'set_metadata')."),
+      metadataFilter: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Exact-match metadata filters (for 'list'). E.g. { salesCustomerPageId: '...' } to find every target linked to a customer.",
+        ),
       lineAccountId: z.string().optional().describe("Filter by LINE account (for 'list')"),
       includeInactive: z
         .boolean()
@@ -30,7 +36,7 @@ export function registerManageTargets(server: McpServer): void {
       limit: z.number().default(50).describe("Max targets to return (for 'list')"),
       offset: z.number().default(0).describe("Pagination offset (for 'list')"),
     },
-    async ({ action, targetType, targetId, metadata, lineAccountId, includeInactive, limit, offset }) => {
+    async ({ action, targetType, targetId, metadata, metadataFilter, lineAccountId, includeInactive, limit, offset }) => {
       try {
         const client = getClient();
 
@@ -39,6 +45,7 @@ export function registerManageTargets(server: McpServer): void {
             type: targetType,
             lineAccountId,
             includeInactive,
+            metadata: metadataFilter,
             limit,
             offset,
           });

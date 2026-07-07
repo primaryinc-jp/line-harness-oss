@@ -103,6 +103,20 @@ describe('GET /api/targets', () => {
     }));
   });
 
+  test('forwards ?metadata.key=value filters for customer reverse lookup', async () => {
+    dbMocks.listLineTargets.mockResolvedValue({ items: [groupTarget], total: 1 });
+
+    const app = setupApp();
+    const res = await app.request('/api/targets?metadata.salesCustomerPageId=notion-page-1&metadata.salesDealPageId=deal-9');
+    expect(res.status).toBe(200);
+    expect(dbMocks.listLineTargets).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      metadataFilters: {
+        salesCustomerPageId: 'notion-page-1',
+        salesDealPageId: 'deal-9',
+      },
+    }));
+  });
+
   test('rejects unsupported type', async () => {
     const app = setupApp();
     const res = await app.request('/api/targets?type=friend');

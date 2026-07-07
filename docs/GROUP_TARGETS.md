@@ -27,6 +27,7 @@ join 時と名前未取得時に LINE の group summary API から best-effort �
 
 ```text
 GET  /api/targets?type=group|room&lineAccountId=&includeInactive=&limit=&offset=
+GET  /api/targets?metadata.salesCustomerPageId=...   # 顧客/商談からの逆引き
 GET  /api/targets/:targetType/:targetId              # 参加者（発言者由来）つき詳細
 PUT  /api/targets/:targetType/:targetId/metadata     # friend metadata と同じマージ更新
 GET  /api/conversations/:targetType/:targetId        # 会話取得（発言者付き、ASC）
@@ -36,6 +37,12 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 - metadata は friends と同じ JSON マージ方式なので、sales-harness の
   `salesCustomerPageId` / `salesDealPageId` などの `sales*` フィールドを
   そのまま read/write できる
+- `?metadata.key=value` フィルタ（friends と同じ contract）で
+  「この顧客/商談に紐づく全 target」を逆引きできる。1顧客に
+  個人トーク（friend）とグループ（target）が両方紐づくケースは、
+  friends 側 `GET /api/friends?metadata.salesCustomerPageId=...` と
+  合わせて集約する（送信先が複数あるときに自動選択しないのは
+  呼び出し側 workflow の責務）
 - 送信 body は friend 送信と同じ:
   `{ messageType?, content, altText?, senderMode?, senderStaffId? }`
 - bot が退出済み（`isActive=false`）の target への送信は 409

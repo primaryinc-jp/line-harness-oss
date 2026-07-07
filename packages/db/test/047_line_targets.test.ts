@@ -84,6 +84,30 @@ describe('047_line_targets.sql', () => {
     ).toThrow(/UNIQUE/);
   });
 
+  it('supports json_extract metadata lookup used by listLineTargets', () => {
+    // Same customer linked to a group and a room — the metadata filter must
+    // return both (one customer ↔ many targets is a supported shape).
+    db.prepare(
+      `INSERT INTO line_targets (id, target_type, line_target_id, metadata)
+       VALUES ('t1', 'group', 'Cg1', '{"salesCustomerPageId":"cust-1"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO line_targets (id, target_type, line_target_id, metadata)
+       VALUES ('t2', 'room', 'Cr1', '{"salesCustomerPageId":"cust-1","salesDealPageId":"deal-9"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO line_targets (id, target_type, line_target_id, metadata)
+       VALUES ('t3', 'group', 'Cg2', '{"salesCustomerPageId":"cust-2"}')`,
+    ).run();
+
+    const rows = db
+      .prepare(
+        `SELECT id FROM line_targets WHERE json_extract(metadata, '$.' || ?) = ? ORDER BY id`,
+      )
+      .all('salesCustomerPageId', 'cust-1') as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(['t1', 't2']);
+  });
+
   it('cascades message deletion when a target is removed', () => {
     db.exec('PRAGMA foreign_keys = ON');
     db.prepare(

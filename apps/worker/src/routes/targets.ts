@@ -92,10 +92,23 @@ targets.get('/api/targets', async (c) => {
     const limit = Math.min(Number(c.req.query('limit') ?? '50'), 200);
     const offset = Number(c.req.query('offset') ?? '0');
 
+    // Metadata filters: ?metadata.key=value (same contract as GET /api/friends).
+    // Lets integrations reverse-look-up "all targets linked to this
+    // customer/deal" via ?metadata.salesCustomerPageId=... — needed when one
+    // customer has both a 1:1 friend and a group conversation.
+    const url = new URL(c.req.url);
+    const metadataFilters: Record<string, string> = {};
+    for (const [key, value] of url.searchParams.entries()) {
+      if (key.startsWith('metadata.')) {
+        metadataFilters[key.slice('metadata.'.length)] = value;
+      }
+    }
+
     const { items, total } = await listLineTargets(c.env.DB, {
       targetType: typeParam as TargetType | undefined,
       lineAccountId: c.req.query('lineAccountId') || undefined,
       includeInactive: c.req.query('includeInactive') === 'true',
+      metadataFilters,
       limit,
       offset,
     });

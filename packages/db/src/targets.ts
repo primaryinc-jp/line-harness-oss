@@ -64,6 +64,13 @@ export interface ListLineTargetsOptions {
   targetType?: 'group' | 'room';
   lineAccountId?: string;
   includeInactive?: boolean;
+  /**
+   * Exact-match filters on JSON metadata keys, e.g.
+   * { salesCustomerPageId: 'notion-page-1' }. Enables the reverse lookup
+   * "all targets linked to this customer/deal" — the same contract as the
+   * ?metadata.key=value filter on GET /api/friends.
+   */
+  metadataFilters?: Record<string, string>;
   limit?: number;
   offset?: number;
 }
@@ -72,7 +79,7 @@ export async function listLineTargets(
   db: D1Database,
   opts: ListLineTargetsOptions = {},
 ): Promise<{ items: LineTarget[]; total: number }> {
-  const { targetType, lineAccountId, includeInactive = false, limit = 50, offset = 0 } = opts;
+  const { targetType, lineAccountId, includeInactive = false, metadataFilters, limit = 50, offset = 0 } = opts;
 
   const conditions: string[] = [];
   const binds: unknown[] = [];
@@ -86,6 +93,10 @@ export async function listLineTargets(
   }
   if (!includeInactive) {
     conditions.push('is_active = 1');
+  }
+  for (const [key, value] of Object.entries(metadataFilters ?? {})) {
+    conditions.push(`json_extract(metadata, '$.' || ?) = ?`);
+    binds.push(key, value);
   }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 

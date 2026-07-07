@@ -640,6 +640,11 @@ export interface TargetListParams {
   type?: TargetType
   lineAccountId?: string
   includeInactive?: boolean
+  /**
+   * Exact-match metadata filters, sent as ?metadata.key=value. Use
+   * { salesCustomerPageId: '...' } to find all targets linked to a customer.
+   */
+  metadata?: Record<string, string>
   limit?: number
   offset?: number
 }

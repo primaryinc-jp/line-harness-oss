@@ -181,6 +181,7 @@ const spec = {
           { name: 'type', in: 'query', schema: { type: 'string', enum: ['group', 'room'] } },
           { name: 'lineAccountId', in: 'query', schema: { type: 'string' } },
           { name: 'includeInactive', in: 'query', schema: { type: 'boolean', default: false } },
+          { name: 'metadata.{key}', in: 'query', schema: { type: 'string' }, description: 'metadata の exact-match フィルタ（例: metadata.salesCustomerPageId=xxx で顧客からの逆引き）' },
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
           { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
         ],
