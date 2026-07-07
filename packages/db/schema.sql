@@ -840,3 +840,43 @@ CREATE TABLE IF NOT EXISTS rich_menu_areas (
 CREATE INDEX IF NOT EXISTS idx_rich_menu_pages_group    ON rich_menu_pages(group_id, order_index);
 CREATE INDEX IF NOT EXISTS idx_rich_menu_areas_page     ON rich_menu_areas(page_id);
 CREATE INDEX IF NOT EXISTS idx_rich_menu_groups_account ON rich_menu_groups(account_id, status);
+
+-- ============================================================
+-- LINE Group/Room Targets (migration 047)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS line_targets (
+  id               TEXT PRIMARY KEY,
+  target_type      TEXT NOT NULL CHECK (target_type IN ('group', 'room')),
+  line_target_id   TEXT UNIQUE NOT NULL,
+  display_name     TEXT,
+  picture_url      TEXT,
+  is_active        INTEGER NOT NULL DEFAULT 1,
+  line_account_id  TEXT,
+  metadata         TEXT,
+  last_message_at  TEXT,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_line_targets_line_target_id ON line_targets (line_target_id);
+CREATE INDEX IF NOT EXISTS idx_line_targets_type ON line_targets (target_type);
+CREATE INDEX IF NOT EXISTS idx_line_targets_last_message_at ON line_targets (last_message_at);
+
+CREATE TABLE IF NOT EXISTS target_messages_log (
+  id                   TEXT PRIMARY KEY,
+  target_id            TEXT NOT NULL REFERENCES line_targets (id) ON DELETE CASCADE,
+  direction            TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+  message_type         TEXT NOT NULL,
+  content              TEXT NOT NULL,
+  sender_line_user_id  TEXT,
+  sender_display_name  TEXT,
+  source               TEXT,
+  line_account_id      TEXT,
+  sender_staff_id      TEXT,
+  sender_name          TEXT,
+  sender_icon_url      TEXT,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_target_messages_log_target_id ON target_messages_log (target_id);
+CREATE INDEX IF NOT EXISTS idx_target_messages_log_created_at ON target_messages_log (created_at);

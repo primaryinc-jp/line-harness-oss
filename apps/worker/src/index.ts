@@ -46,6 +46,7 @@ import { scoring } from './routes/scoring.js';
 import { templates } from './routes/templates.js';
 import { chats } from './routes/chats.js';
 import { conversations } from './routes/conversations.js';
+import { targets } from './routes/targets.js';
 // notifications ルート (notification_rules CRUD + notifications 一覧) は
 // インボックス機能 (/api/inbox/unanswered) に置き換えたため削除。
 // DB テーブル notification_rules / notifications は archive 目的で残してある。
@@ -163,6 +164,7 @@ app.route('/', scoring);
 app.route('/', templates);
 app.route('/', chats);
 app.route('/', conversations);
+app.route('/', targets);
 app.route('/', stripe);
 app.route('/', health);
 app.route('/', automations);

@@ -6,9 +6,20 @@ import { autoTrackUrls } from "./auto-track-urls.js";
 export function registerSendMessage(server: McpServer): void {
   server.tool(
     "send_message",
-    "Send a text, image, or flex message to a specific friend. Use messageType 'image' for standalone image messages, 'flex' for rich card layouts.",
+    "Send a text, image, or flex message to a specific friend, or to a group/room target when targetType+targetId are given. Use messageType 'image' for standalone image messages, 'flex' for rich card layouts.",
     {
-      friendId: z.string().describe("The friend's ID to send the message to"),
+      friendId: z
+        .string()
+        .optional()
+        .describe("The friend's ID to send the message to. Omit when using targetType+targetId."),
+      targetType: z
+        .enum(["group", "room"])
+        .optional()
+        .describe("Set together with targetId to send to a group/room instead of a friend."),
+      targetId: z
+        .string()
+        .optional()
+        .describe("Group/room target ID (from manage_targets list)."),
       content: z
         .string()
         .describe(
@@ -41,9 +52,12 @@ export function registerSendMessage(server: McpServer): void {
         .optional()
         .describe("Staff ID to send as. Only owner credentials can select another staff member."),
     },
-    async ({ friendId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
+    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
       try {
         const client = getClient();
+        if (!friendId && !(targetType && targetId)) {
+          throw new Error("friendId is required unless targetType and targetId are both provided");
+        }
 
         // Add test label
         let finalContent = content;
@@ -72,20 +86,33 @@ export function registerSendMessage(server: McpServer): void {
         }
 
         // Auto-track URLs in flex messages
+        const recipientLabel = targetType && targetId
+          ? `${targetType} ${targetId.slice(0, 8)}`
+          : `DM to ${friendId!.slice(0, 8)}`;
         const { content: trackedContent } = await autoTrackUrls(
           client,
           finalContent,
           messageType,
-          `DM to ${friendId.slice(0, 8)}`,
+          recipientLabel,
         );
 
-        const result = await client.friends.sendMessage(
-          friendId,
-          trackedContent,
-          messageType,
-          altText,
-          senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined,
-        );
+        const senderSelection = senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined;
+        const result = targetType && targetId
+          ? await client.targets.sendMessage(
+              targetType,
+              targetId,
+              trackedContent,
+              messageType,
+              altText,
+              senderSelection,
+            )
+          : await client.friends.sendMessage(
+              friendId!,
+              trackedContent,
+              messageType,
+              altText,
+              senderSelection,
+            );
         return {
           content: [
             {

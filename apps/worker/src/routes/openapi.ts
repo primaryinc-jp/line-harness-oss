@@ -172,6 +172,85 @@ const spec = {
     },
   },
   paths: {
+    // ── Targets (group/room) ────────────────────────────────────────────────
+    '/api/targets': {
+      get: {
+        tags: ['Targets'],
+        summary: 'グループ/ルーム target 一覧取得',
+        parameters: [
+          { name: 'type', in: 'query', schema: { type: 'string', enum: ['group', 'room'] } },
+          { name: 'lineAccountId', in: 'query', schema: { type: 'string' } },
+          { name: 'includeInactive', in: 'query', schema: { type: 'boolean', default: false } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
+          { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+        ],
+        responses: { '200': { description: 'Target list with metadata (sales link fields included)' } },
+      },
+    },
+    '/api/targets/{targetType}/{targetId}': {
+      get: {
+        tags: ['Targets'],
+        summary: 'target 詳細取得（発言者由来の参加者一覧つき）',
+        parameters: [
+          { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
+          { name: 'targetId', in: 'path', required: true, schema: { type: 'string' }, description: 'Harness ID または LINE groupId/roomId' },
+        ],
+        responses: { '200': { description: 'Target detail' }, '404': { description: 'Not found' } },
+      },
+    },
+    '/api/targets/{targetType}/{targetId}/metadata': {
+      put: {
+        tags: ['Targets'],
+        summary: 'target metadata マージ更新',
+        parameters: [
+          { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
+          { name: 'targetId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        requestBody: { content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        responses: { '200': { description: 'Updated target' }, '404': { description: 'Not found' } },
+      },
+    },
+    '/api/targets/{targetType}/{targetId}/messages': {
+      post: {
+        tags: ['Targets'],
+        summary: 'グループ/ルームへメッセージ送信',
+        parameters: [
+          { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
+          { name: 'targetId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  messageType: { type: 'string', enum: ['text', 'image', 'flex'], default: 'text' },
+                  content: { type: 'string' },
+                  altText: { type: 'string' },
+                  senderMode: { type: 'string', enum: ['official', 'self'] },
+                  senderStaffId: { type: 'string' },
+                },
+                required: ['content'],
+              },
+            },
+          },
+        },
+        responses: { '200': { description: 'Sent' }, '404': { description: 'Not found' }, '409': { description: 'Target inactive (bot left)' } },
+      },
+    },
+    '/api/conversations/{targetType}/{targetId}': {
+      get: {
+        tags: ['Targets'],
+        summary: 'グループ/ルーム会話取得（発言者付きメッセージ履歴）',
+        parameters: [
+          { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
+          { name: 'targetId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
+          { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' } },
+        ],
+        responses: { '200': { description: 'Target + messages (ASC)' }, '404': { description: 'Not found' } },
+      },
+    },
     // ── Friends ─────────────────────────────────────────────────────────────
     '/api/friends': {
       get: {
@@ -557,6 +636,7 @@ const spec = {
   },
   tags: [
     { name: 'Friends', description: '友だち管理' },
+    { name: 'Targets', description: 'グループ/ルーム会話 target' },
     { name: 'Tags', description: 'タグ管理' },
     { name: 'Scenarios', description: 'ステップ配信シナリオ' },
     { name: 'Broadcasts', description: '一斉配信' },

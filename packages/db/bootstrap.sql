@@ -468,6 +468,20 @@ CREATE TABLE line_accounts (
   updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 , login_channel_id TEXT, login_channel_secret TEXT, liff_id TEXT, token_expires_at TEXT, og_site_name TEXT, og_default_image_url TEXT, og_default_description TEXT);
 
+CREATE TABLE line_targets (
+  id               TEXT PRIMARY KEY,
+  target_type      TEXT NOT NULL CHECK (target_type IN ('group', 'room')),
+  line_target_id   TEXT UNIQUE NOT NULL,
+  display_name     TEXT,
+  picture_url      TEXT,
+  is_active        INTEGER NOT NULL DEFAULT 1,
+  line_account_id  TEXT,
+  metadata         TEXT,
+  last_message_at  TEXT,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
 CREATE TABLE link_clicks (
   id TEXT PRIMARY KEY,
   tracked_link_id TEXT NOT NULL REFERENCES tracked_links (id) ON DELETE CASCADE,
@@ -748,6 +762,22 @@ CREATE TABLE tags (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE target_messages_log (
+  id                   TEXT PRIMARY KEY,
+  target_id            TEXT NOT NULL REFERENCES line_targets (id) ON DELETE CASCADE,
+  direction            TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+  message_type         TEXT NOT NULL,
+  content              TEXT NOT NULL,
+  sender_line_user_id  TEXT,
+  sender_display_name  TEXT,
+  source               TEXT,
+  line_account_id      TEXT,
+  sender_staff_id      TEXT,
+  sender_name          TEXT,
+  sender_icon_url      TEXT,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
 CREATE TABLE templates (
   id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
@@ -908,6 +938,12 @@ CREATE INDEX idx_idempotency_expires ON booking_idempotency_keys (expires_at);
 CREATE INDEX idx_line_accounts_display_order
   ON line_accounts (display_order, created_at);
 
+CREATE INDEX idx_line_targets_last_message_at ON line_targets (last_message_at);
+
+CREATE INDEX idx_line_targets_line_target_id ON line_targets (line_target_id);
+
+CREATE INDEX idx_line_targets_type ON line_targets (target_type);
+
 CREATE INDEX idx_link_clicks_friend ON link_clicks (friend_id);
 
 CREATE INDEX idx_link_clicks_link ON link_clicks (tracked_link_id);
@@ -955,6 +991,10 @@ CREATE INDEX idx_staff_members_role ON staff_members(role);
 CREATE INDEX idx_stripe_events_friend ON stripe_events (friend_id);
 
 CREATE INDEX idx_stripe_events_type ON stripe_events (event_type);
+
+CREATE INDEX idx_target_messages_log_created_at ON target_messages_log (created_at);
+
+CREATE INDEX idx_target_messages_log_target_id ON target_messages_log (target_id);
 
 CREATE INDEX idx_templates_category ON templates (category);
 

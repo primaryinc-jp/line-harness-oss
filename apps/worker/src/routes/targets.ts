@@ -1,0 +1,276 @@
+import { Hono } from 'hono';
+import {
+  getLineTargetById,
+  getLineTargetByLineTargetId,
+  listLineTargets,
+  updateLineTargetMetadata,
+  getTargetMessages,
+  getTargetParticipants,
+  logTargetMessage,
+} from '@line-crm/db';
+import type { LineTarget, TargetMessage } from '@line-crm/db';
+import { buildMessage } from '../services/step-delivery.js';
+import type { Env } from '../index.js';
+import { MessageSenderError, resolveMessageSender, type SenderSelection } from '../utils/message-sender.js';
+
+/**
+ * Group/room conversation "targets" (P0 group support).
+ *
+ * A target is a non-1:1 send/receive destination: a LINE group or multi-person
+ * room. Friends keep their existing /api/friends surface; these routes expose
+ * the same list / detail / metadata / conversation / send operations for
+ * group/room targets so external integrations (sales-harness) can treat
+ * friends and groups uniformly.
+ *
+ * :targetId accepts either the harness row id (uuid) or the raw LINE
+ * groupId/roomId — external callers usually only know the LINE id.
+ */
+const targets = new Hono<Env>();
+
+const TARGET_TYPES = ['group', 'room'] as const;
+type TargetType = (typeof TARGET_TYPES)[number];
+
+function isTargetType(v: string): v is TargetType {
+  return (TARGET_TYPES as readonly string[]).includes(v);
+}
+
+function fallbackDisplayName(row: LineTarget): string {
+  const suffix = row.line_target_id.slice(-6);
+  return row.target_type === 'group' ? `LINEグループ (${suffix})` : `複数人トーク (${suffix})`;
+}
+
+function serializeTarget(row: LineTarget) {
+  return {
+    id: row.id,
+    targetType: row.target_type,
+    targetId: row.line_target_id,
+    displayName: row.display_name ?? fallbackDisplayName(row),
+    pictureUrl: row.picture_url,
+    isActive: Boolean(row.is_active),
+    lineAccountId: row.line_account_id,
+    metadata: JSON.parse(row.metadata || '{}') as Record<string, unknown>,
+    lastMessageAt: row.last_message_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializeTargetMessage(m: TargetMessage) {
+  return {
+    id: m.id,
+    direction: m.direction,
+    messageType: m.message_type,
+    content: m.content,
+    senderLineUserId: m.sender_line_user_id,
+    senderDisplayName: m.sender_display_name,
+    source: m.source,
+    senderStaffId: m.sender_staff_id,
+    senderName: m.sender_name,
+    createdAt: m.created_at,
+  };
+}
+
+/** Resolve :targetType/:targetId (harness uuid or LINE group/room id). */
+async function resolveTarget(
+  db: D1Database,
+  targetType: string,
+  targetId: string,
+): Promise<LineTarget | null> {
+  const byLineId = await getLineTargetByLineTargetId(db, targetId);
+  const target = byLineId ?? (await getLineTargetById(db, targetId));
+  if (!target || target.target_type !== targetType) return null;
+  return target;
+}
+
+// GET /api/targets?type=group|room&lineAccountId=&includeInactive=&limit=&offset=
+targets.get('/api/targets', async (c) => {
+  try {
+    const typeParam = c.req.query('type');
+    if (typeParam && !isTargetType(typeParam)) {
+      return c.json({ success: false, error: `unsupported target type: ${typeParam}` }, 400);
+    }
+    const limit = Math.min(Number(c.req.query('limit') ?? '50'), 200);
+    const offset = Number(c.req.query('offset') ?? '0');
+
+    const { items, total } = await listLineTargets(c.env.DB, {
+      targetType: typeParam as TargetType | undefined,
+      lineAccountId: c.req.query('lineAccountId') || undefined,
+      includeInactive: c.req.query('includeInactive') === 'true',
+      limit,
+      offset,
+    });
+
+    return c.json({
+      success: true,
+      data: {
+        items: items.map(serializeTarget),
+        total,
+        limit,
+        offset,
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/targets error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// GET /api/targets/:targetType/:targetId — detail incl. observed participants
+targets.get('/api/targets/:targetType/:targetId', async (c) => {
+  try {
+    const targetType = c.req.param('targetType');
+    if (!isTargetType(targetType)) {
+      return c.json({ success: false, error: `unsupported target type: ${targetType}` }, 400);
+    }
+    const target = await resolveTarget(c.env.DB, targetType, c.req.param('targetId'));
+    if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+
+    // Participants are derived from who has spoken (LINE only exposes full
+    // member lists to verified accounts), so this is best-effort by design.
+    const participants = await getTargetParticipants(c.env.DB, target.id);
+
+    return c.json({
+      success: true,
+      data: {
+        ...serializeTarget(target),
+        participants,
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/targets/:targetType/:targetId error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// PUT /api/targets/:targetType/:targetId/metadata - merge metadata fields
+// (same merge semantics as PUT /api/friends/:id/metadata)
+targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
+  try {
+    const targetType = c.req.param('targetType');
+    if (!isTargetType(targetType)) {
+      return c.json({ success: false, error: `unsupported target type: ${targetType}` }, 400);
+    }
+    const db = c.env.DB;
+    const target = await resolveTarget(db, targetType, c.req.param('targetId'));
+    if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+
+    const body = await c.req.json<Record<string, unknown>>();
+    const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
+    const merged = { ...existing, ...body };
+    await updateLineTargetMetadata(db, target.id, JSON.stringify(merged));
+
+    const updated = await getLineTargetById(db, target.id);
+    return c.json({ success: true, data: serializeTarget(updated!) });
+  } catch (err) {
+    console.error('PUT /api/targets/:targetType/:targetId/metadata error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// GET /api/conversations/:targetType/:targetId?limit=&before=
+// Group/room conversation thread. Two path segments, so this never collides
+// with the friend thread route GET /api/conversations/:friendId.
+targets.get('/api/conversations/:targetType/:targetId', async (c) => {
+  try {
+    const targetType = c.req.param('targetType');
+    if (!isTargetType(targetType)) {
+      return c.json({ success: false, error: `unsupported target type: ${targetType}` }, 400);
+    }
+    const db = c.env.DB;
+    const target = await resolveTarget(db, targetType, c.req.param('targetId'));
+    if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+
+    const limit = Math.min(Number(c.req.query('limit') ?? '50'), 200);
+    const before = c.req.query('before') ?? null;
+    const messages = await getTargetMessages(db, target.id, { limit, before });
+
+    return c.json({
+      success: true,
+      data: {
+        target: serializeTarget(target),
+        messages: messages.reverse().map(serializeTargetMessage),
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/conversations/:targetType/:targetId error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// POST /api/targets/:targetType/:targetId/messages - send message to group/room
+targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
+  try {
+    const targetType = c.req.param('targetType');
+    if (!isTargetType(targetType)) {
+      return c.json({ success: false, error: `unsupported target type: ${targetType}` }, 400);
+    }
+    const body = await c.req.json<{
+      messageType?: string;
+      content: string;
+      altText?: string;
+    } & SenderSelection>();
+    if (!body.content) {
+      return c.json({ success: false, error: 'content is required' }, 400);
+    }
+
+    const db = c.env.DB;
+    const target = await resolveTarget(db, targetType, c.req.param('targetId'));
+    if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+    if (!target.is_active) {
+      return c.json({ success: false, error: 'Target is inactive (bot has left the group/room)' }, 409);
+    }
+
+    const { LineClient } = await import('@line-crm/line-sdk');
+    // Resolve access token from the target's account (multi-account support)
+    let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (target.line_account_id) {
+      const { getLineAccountById } = await import('@line-crm/db');
+      const account = await getLineAccountById(db, target.line_account_id);
+      if (account) accessToken = account.channel_access_token;
+    }
+    const lineClient = new LineClient(accessToken);
+    const messageType = body.messageType ?? 'text';
+    const sender = await resolveMessageSender(db, c.get('staff'), body);
+
+    // Auto-wrap URLs with tracking links, same as the friend send path
+    const { autoTrackContent } = await import('../services/auto-track.js');
+    const tracked = await autoTrackContent(
+      db, messageType, body.content,
+      c.env.WORKER_URL || new URL(c.req.url).origin,
+    );
+
+    const message = buildMessage(tracked.messageType, tracked.content, body.altText);
+    await lineClient.pushMessage(target.line_target_id, [message], sender.lineSender);
+
+    const messageId = await logTargetMessage(db, {
+      targetId: target.id,
+      direction: 'outgoing',
+      messageType,
+      content: body.content,
+      source: 'manual',
+      lineAccountId: target.line_account_id,
+      senderStaffId: sender.staffId,
+      senderName: sender.name,
+      senderIconUrl: sender.iconUrl,
+    });
+
+    return c.json({ success: true, data: { messageId } });
+  } catch (err) {
+    if (err instanceof MessageSenderError) {
+      return c.json({ success: false, error: err.message }, err.status as 400 | 403 | 404);
+    }
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('POST /api/targets/:targetType/:targetId/messages error:', errMsg);
+    return c.json({ success: false, error: errMsg }, 500);
+  }
+});
+
+export { targets };

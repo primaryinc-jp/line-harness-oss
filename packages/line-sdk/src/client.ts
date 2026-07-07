@@ -1,6 +1,7 @@
 import type {
   BroadcastRequest,
   FlexContainer,
+  GroupSummary,
   Message,
   MessageSender,
   MulticastRequest,
@@ -63,6 +64,41 @@ export class LineClient {
     const { data } = await this.request(
       'GET',
       `/v2/bot/profile/${encodeURIComponent(userId)}`,
+    );
+    return data as UserProfile;
+  }
+
+  // ─── Group / Room ─────────────────────────────────────────────────────────
+
+  /** Group name + icon. Available to any bot that is a member of the group. */
+  async getGroupSummary(groupId: string): Promise<GroupSummary> {
+    const { data } = await this.request(
+      'GET',
+      `/v2/bot/group/${encodeURIComponent(groupId)}/summary`,
+    );
+    return data as GroupSummary;
+  }
+
+  /** Profile of a group member. Works while the member is in the group. */
+  async getGroupMemberProfile(
+    groupId: string,
+    userId: string,
+  ): Promise<UserProfile> {
+    const { data } = await this.request(
+      'GET',
+      `/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`,
+    );
+    return data as UserProfile;
+  }
+
+  /** Profile of a room (multi-person chat) member. */
+  async getRoomMemberProfile(
+    roomId: string,
+    userId: string,
+  ): Promise<UserProfile> {
+    const { data } = await this.request(
+      'GET',
+      `/v2/bot/room/${encodeURIComponent(roomId)}/member/${encodeURIComponent(userId)}`,
     );
     return data as UserProfile;
   }

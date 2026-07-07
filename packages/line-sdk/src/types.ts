@@ -129,11 +129,26 @@ export interface PostbackEvent extends BaseEvent {
   };
 }
 
+/** Bot joined a group/room (invited by a member). */
+export interface JoinEvent extends BaseEvent {
+  type: 'join';
+  replyToken: string;
+  source: GroupSource | RoomSource;
+}
+
+/** Bot left (or was removed from) a group/room. No replyToken. */
+export interface LeaveEvent extends BaseEvent {
+  type: 'leave';
+  source: GroupSource | RoomSource;
+}
+
 export type WebhookEvent =
   | MessageEvent
   | FollowEvent
   | UnfollowEvent
-  | PostbackEvent;
+  | PostbackEvent
+  | JoinEvent
+  | LeaveEvent;
 
 export interface WebhookRequestBody {
   destination: string;
@@ -147,6 +162,13 @@ export interface UserProfile {
   userId: string;
   pictureUrl?: string;
   statusMessage?: string;
+}
+
+/** GET /v2/bot/group/{groupId}/summary */
+export interface GroupSummary {
+  groupId: string;
+  groupName: string;
+  pictureUrl?: string;
 }
 
 // ─── Send message types ───────────────────────────────────────────────────────

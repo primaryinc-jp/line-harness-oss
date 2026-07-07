@@ -20,6 +20,11 @@ export const FEATURES = [
   'affiliates',
   'chats',
   'conversations',
+  // Group/room conversation targets (list/detail/metadata/conversation/send).
+  // External integrations check these slugs to decide whether group workflows
+  // are available on this harness.
+  'targets',
+  'group_conversations',
   'auto_replies',
   'rich_menus',
   'webhooks',
@@ -61,6 +66,8 @@ capabilities.get('/api/capabilities', async (c) => {
         forms: '/api/forms',
         tags: '/api/tags',
         chats: '/api/chats',
+        targets: '/api/targets',
+        targetConversations: '/api/conversations/:targetType/:targetId',
         liff: '/liff',
       },
     },

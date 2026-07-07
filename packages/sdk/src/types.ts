@@ -607,3 +607,64 @@ export interface GetConversationParams {
   limit?: number
   before?: string
 }
+
+// ─── Group/room targets ──────────────────────────────────────────────────────
+
+export type TargetType = 'group' | 'room'
+
+export interface Target {
+  id: string
+  targetType: TargetType
+  targetId: string
+  displayName: string
+  pictureUrl: string | null
+  isActive: boolean
+  lineAccountId: string | null
+  metadata: Record<string, unknown>
+  lastMessageAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TargetParticipant {
+  lineUserId: string
+  displayName: string | null
+  lastSpokeAt: string
+}
+
+export interface TargetDetail extends Target {
+  participants: TargetParticipant[]
+}
+
+export interface TargetListParams {
+  type?: TargetType
+  lineAccountId?: string
+  includeInactive?: boolean
+  limit?: number
+  offset?: number
+}
+
+export interface TargetListResponse {
+  items: Target[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface TargetMessage {
+  id: string
+  direction: 'incoming' | 'outgoing'
+  messageType: string
+  content: string
+  senderLineUserId: string | null
+  senderDisplayName: string | null
+  source: string | null
+  senderStaffId: string | null
+  senderName: string | null
+  createdAt: string
+}
+
+export interface TargetConversation {
+  target: Target
+  messages: TargetMessage[]
+}

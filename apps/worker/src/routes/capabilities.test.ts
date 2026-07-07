@@ -48,6 +48,9 @@ describe('GET /api/capabilities', () => {
     expect(body.data.features).toContain('friends');
     expect(body.data.features).toContain('broadcasts');
     expect(body.data.features).toContain('staff');
+    expect(body.data.features).toContain('targets');
+    expect(body.data.features).toContain('group_conversations');
+    expect(body.data.endpoints.targets).toBe('/api/targets');
     expect(body.data.min_app_version).toBeDefined();
     expect(body.data.product).toBe('line-harness');
     expect(body.data.platform).toBe('line');

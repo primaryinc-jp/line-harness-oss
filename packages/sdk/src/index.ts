@@ -15,6 +15,7 @@ export { StaffResource } from './resources/staff.js'
 export { ImagesResource } from './resources/images.js'
 export { AutoRepliesResource } from './resources/auto-replies.js'
 export { ConversationsResource } from './resources/conversations.js'
+export { TargetsResource } from './resources/targets.js'
 
 // All types
 export type {
@@ -74,6 +75,14 @@ export type {
   ConversationMessage,
   ConversationDetail,
   GetConversationParams,
+  TargetType,
+  Target,
+  TargetParticipant,
+  TargetDetail,
+  TargetListParams,
+  TargetListResponse,
+  TargetMessage,
+  TargetConversation,
 } from './types.js'
 
 export type {
