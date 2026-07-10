@@ -54,7 +54,7 @@ describe('handleTargetEvent', () => {
 
     await handleTargetEvent(
       db, lineClient({ getGroupSummary }),
-      event({ type: 'join', source: { type: 'group', groupId: 'Cgroup1' } }),
+      event({ type: 'join', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
       'token', 'acc-1',
     );
     expect(getGroupSummary).toHaveBeenCalledWith('Cgroup1');
@@ -64,6 +64,8 @@ describe('handleTargetEvent', () => {
       displayName: '田中家グループ',
       lineAccountId: 'acc-1',
     }));
+    // Reactivation goes through the event-timestamp-guarded membership update
+    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, 'Cgroup1', true, 1751000000000);
   });
 
   test('group summary failure is best-effort: target is still registered', async () => {
@@ -131,10 +133,25 @@ describe('handleTargetEvent', () => {
   test('leave deactivates the target without upserting', async () => {
     await handleTargetEvent(
       db, lineClient(),
-      event({ type: 'leave', source: { type: 'group', groupId: 'Cgroup1' } }),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
       'token', null,
     );
-    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, 'Cgroup1', false);
+    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, 'Cgroup1', false, 1751000000000);
     expect(dbMocks.upsertLineTarget).not.toHaveBeenCalled();
+  });
+
+  test('message events never call the membership update (cannot reactivate a left target)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    await handleTargetEvent(
+      db, lineClient({ getGroupMemberProfile: vi.fn().mockRejectedValue(new Error('n/a')) }),
+      event({
+        type: 'message',
+        source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
+        message: { id: 'mid-9', type: 'text', text: '過去メッセージのredelivery' },
+      }),
+      'token', null,
+    );
+    expect(dbMocks.setLineTargetActive).not.toHaveBeenCalled();
+    expect(dbMocks.logTargetMessage).toHaveBeenCalled();
   });
 });

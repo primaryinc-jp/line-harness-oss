@@ -6,7 +6,9 @@
 -- official account joins a group/room (join event) or when a message occurs
 -- in one. `metadata` is a JSON TEXT column mirroring friends.metadata so the
 -- sales-harness link fields (salesCustomerPageId, salesDealPageId, ...) work
--- identically for 1:1 friends and group targets.
+-- identically for 1:1 friends and group targets. membership_updated_at is the
+-- LINE event.timestamp (ms) of the last join/leave applied; it guards
+-- membership transitions against out-of-order webhook redelivery.
 CREATE TABLE IF NOT EXISTS line_targets (
   id               TEXT PRIMARY KEY,
   target_type      TEXT NOT NULL CHECK (target_type IN ('group', 'room')),
@@ -17,6 +19,7 @@ CREATE TABLE IF NOT EXISTS line_targets (
   line_account_id  TEXT,
   metadata         TEXT,
   last_message_at  TEXT,
+  membership_updated_at INTEGER,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );

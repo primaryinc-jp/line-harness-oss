@@ -282,6 +282,9 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
       tracked = await autoTrackContent(
         db, messageType, body.content,
         c.env.WORKER_URL || new URL(c.req.url).origin,
+        // Tracked links belong to the target's account so they resolve
+        // through that account's LIFF (upstream per-account tracking contract)
+        { lineAccountId: target.line_account_id },
       );
     }
 

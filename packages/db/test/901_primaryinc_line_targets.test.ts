@@ -3,14 +3,14 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
 
 function loadDb(): Database.Database {
   const db = new Database(':memory:');
-  // schema.sql already contains the 047 tables (kept in sync for fresh
+  // schema.sql already contains the 901 tables (kept in sync for fresh
   // installs); applying the migration on top verifies idempotence for
   // existing installs.
   const schema = readFileSync(join(PKG_ROOT, 'schema.sql'), 'utf8');
@@ -65,6 +65,7 @@ describe('901_primaryinc_line_targets.sql', () => {
         'line_account_id',
         'metadata',
         'last_message_at',
+        'membership_updated_at',
         'created_at',
         'updated_at',
       ].sort(),
@@ -158,17 +159,37 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(count.c).toBe(1);
   });
 
-  it('upsertLineTarget preserves known name/account on null input and reactivates', async () => {
+  it('upsertLineTarget preserves known name/account on null input and never touches is_active', async () => {
     const d1 = asD1(db);
     await upsertLineTarget(d1, {
       targetType: 'group', lineTargetId: 'Cg1', displayName: '田中家', pictureUrl: 'p.png', lineAccountId: 'acc1',
     });
     db.prepare(`UPDATE line_targets SET is_active = 0`).run();
+    // Regression (leave → old message redelivery): a message-driven upsert
+    // must NOT reactivate a target the bot has left
     const row = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
     expect(row.display_name).toBe('田中家');
     expect(row.picture_url).toBe('p.png');
     expect(row.line_account_id).toBe('acc1');
-    expect(row.is_active).toBe(1);
+    expect(row.is_active).toBe(0);
+  });
+
+  it('setLineTargetActive applies membership transitions in event-time order', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    const active = () =>
+      (db.prepare(`SELECT is_active AS a FROM line_targets WHERE line_target_id = 'Cg1'`).get() as { a: number }).a;
+
+    // leave at t=200
+    await setLineTargetActive(d1, 'Cg1', false, 200);
+    expect(active()).toBe(0);
+    // stale join redelivered out of order (t=100) must NOT reactivate —
+    // it would re-open sends to a group the bot already left
+    await setLineTargetActive(d1, 'Cg1', true, 100);
+    expect(active()).toBe(0);
+    // a genuinely newer join (t=300) does reactivate
+    await setLineTargetActive(d1, 'Cg1', true, 300);
+    expect(active()).toBe(1);
   });
 
   it('logTargetMessage dedupes redelivered webhook messages by line_message_id', async () => {

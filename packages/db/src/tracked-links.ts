@@ -50,6 +50,14 @@ export interface CreateTrackedLinkInput {
   scenarioId?: string | null;
   introTemplateId?: string | null;
   rewardTemplateId?: string | null;
+  /**
+   * Owning LINE account for per-account link resolution (upstream contract,
+   * c5cda13). This base's tracked_links table has no line_account_id column
+   * yet, so the value is accepted but not persisted until the upstream
+   * per-account tracking schema is synced in — call sites should already
+   * pass it so they are correct at merge time.
+   */
+  lineAccountId?: string | null;
 }
 
 export async function createTrackedLink(

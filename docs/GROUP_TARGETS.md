@@ -12,7 +12,10 @@ target は次のタイミングで自動登録される（過去グループの�
 - 公式アカウントがグループ/ルームに招待された（`join` イベント）
 - グループ/ルーム内でメッセージが発生した
 
-`leave` イベントで `isActive=false` になる。グループ名・アイコンは
+`leave` イベントで `isActive=false` になる。join/leave の状態遷移は
+`event.timestamp` でガードされ、順序が入れ替わった webhook 再配信
+（leave 後に届く古い join/message）が退出済み target を再 active 化する
+ことはない。グループ名・アイコンは
 join 時と名前未取得時に LINE の group summary API から best-effort で取得する
 （room には summary API がないため fallback 名になる）。
 
@@ -81,6 +84,7 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 migration `901_primaryinc_line_targets.sql`（fork-local 900番台 prefix、`schema.sql` にも同梱）:
 
 - `line_targets` — target 本体。`target_type`（group|room）、
-  `line_target_id`（UNIQUE）、`display_name`、`metadata`、`last_message_at` など
+  `line_target_id`（UNIQUE）、`display_name`、`metadata`、`last_message_at`、
+  `membership_updated_at`（最後に適用した join/leave の event.timestamp）など
 - `target_messages_log` — グループ用メッセージログ。`messages_log` は
   `friend_id NOT NULL` のため並列テーブルとして追加

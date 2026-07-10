@@ -37,7 +37,8 @@ export async function handleTargetEvent(
   if (!lineTargetId) return;
 
   if (event.type === 'leave') {
-    await setLineTargetActive(db, lineTargetId, false);
+    // event.timestamp guards against out-of-order redelivery (see setLineTargetActive)
+    await setLineTargetActive(db, lineTargetId, false, event.timestamp);
     console.log(`[target] leave ${targetType}=${lineTargetId}`);
     return;
   }
@@ -68,6 +69,10 @@ export async function handleTargetEvent(
   });
 
   if (event.type === 'join') {
+    // Reactivation is timestamp-guarded: a stale join redelivered after a
+    // newer leave must not flip a left target back to active. Messages never
+    // reactivate (upsertLineTarget does not touch is_active).
+    await setLineTargetActive(db, lineTargetId, true, event.timestamp);
     console.log(`[target] join ${targetType}=${lineTargetId} name=${target.display_name ?? 'unknown'}`);
     return;
   }

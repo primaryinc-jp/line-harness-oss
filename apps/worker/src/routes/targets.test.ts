@@ -314,6 +314,27 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     }));
   });
 
+  test('tracked links are created under the target-owning account (multi-account)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const { autoTrackContent } = await import('../services/auto-track.js');
+
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'https://example.com', senderMode: 'official' }),
+    });
+    expect(res.status).toBe(200);
+    // Upstream per-account contract: the owning account rides along so the
+    // short link resolves through that account's LIFF, not the global default
+    expect(autoTrackContent).toHaveBeenCalledWith(
+      expect.anything(), 'text', 'https://example.com', expect.any(String),
+      { lineAccountId: 'acc-1' },
+    );
+  });
+
   test('trackLinks:false skips server-side URL auto-tracking', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
     dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });

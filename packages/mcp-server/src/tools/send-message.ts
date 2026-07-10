@@ -51,8 +51,14 @@ export function registerSendMessage(server: McpServer): void {
         .string()
         .optional()
         .describe("Staff ID to send as. Only owner credentials can select another staff member."),
+      trackLinks: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Wrap URLs in the message with tracked short links (done server-side, per LINE account). Set false to send URLs as-is.",
+        ),
     },
-    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
+    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId, trackLinks }) => {
       try {
         const client = getClient();
         // Destination must be exactly one of friendId XOR (targetType+targetId).
@@ -111,21 +117,30 @@ export function registerSendMessage(server: McpServer): void {
             messageType,
             altText,
             senderSelection,
+            { trackLinks },
           );
         } else {
-          // Friend path keeps the legacy MCP-side URL auto-tracking.
-          const { content: trackedContent } = await autoTrackUrls(
-            client,
-            finalContent,
-            messageType,
-            `DM to ${friendId!.slice(0, 8)}`,
-          );
+          // Friend path keeps the legacy MCP-side URL auto-tracking while
+          // trackLinks is on; trackLinks:false skips it and is forwarded to
+          // the worker so server-side tracking is disabled too (upstream
+          // trackLinks contract).
+          let friendContent = finalContent;
+          if (trackLinks) {
+            const { content: trackedContent } = await autoTrackUrls(
+              client,
+              finalContent,
+              messageType,
+              `DM to ${friendId!.slice(0, 8)}`,
+            );
+            friendContent = trackedContent;
+          }
           result = await client.friends.sendMessage(
             friendId!,
-            trackedContent,
+            friendContent,
             messageType,
             altText,
             senderSelection,
+            { trackLinks },
           );
         }
         return {

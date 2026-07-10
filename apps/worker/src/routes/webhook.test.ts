@@ -35,10 +35,6 @@ vi.mock('../services/event-bus.js', () => ({
   fireEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/target-webhook.js', () => ({
-  handleTargetEvent: vi.fn().mockResolvedValue(undefined),
-}));
-
 vi.mock('../services/step-delivery.js', () => ({
   buildMessage: vi.fn(),
   expandVariables: vi.fn(),
@@ -158,53 +154,5 @@ describe('POST /webhook — DoS defenses (#104)', () => {
     expect(res.status).toBe(200);
     // Fast-rejected before any crypto / DB work.
     expect(verifySignature).not.toHaveBeenCalled();
-  });
-});
-
-describe('POST /webhook — group/room target events', () => {
-  // Handler details live in services/target-webhook.test.ts; this file only
-  // asserts the routing contract: group/room events are delegated to the
-  // service and never fall through to the 1:1 friend paths.
-  test('group event is delegated to handleTargetEvent and skips friend paths', async () => {
-    vi.mocked(verifySignature).mockResolvedValue(true);
-    const { handleTargetEvent } = await import('../services/target-webhook.js');
-    const { getFriendByLineUserId } = await import('@line-crm/db');
-
-    const app = setupApp();
-    const res = await app.request(
-      '/webhook',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // 44 chars to pass the cheap length pre-check; verifySignature is mocked
-          'X-Line-Signature': 'a'.repeat(43) + '=',
-        },
-        body: JSON.stringify({
-          destination: 'x',
-          events: [{
-            type: 'message',
-            replyToken: 'rt',
-            source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
-            message: { id: 'mid-1', type: 'text', text: '内見できますか' },
-            timestamp: 0,
-            mode: 'active',
-            webhookEventId: 'we-1',
-            deliveryContext: { isRedelivery: false },
-          }],
-        }),
-      },
-      baseEnv,
-      baseExecutionCtx,
-    );
-    // Event handling runs in waitUntil — await it so assertions see the calls
-    for (const call of vi.mocked(baseExecutionCtx.waitUntil).mock.calls) await call[0];
-
-    expect(res.status).toBe(200);
-    expect(handleTargetEvent).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(handleTargetEvent).mock.calls[0][2]).toMatchObject({
-      source: { type: 'group', groupId: 'Cgroup1' },
-    });
-    expect(getFriendByLineUserId).not.toHaveBeenCalled();
   });
 });

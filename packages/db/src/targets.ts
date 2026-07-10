@@ -20,6 +20,12 @@ export interface LineTarget {
   line_account_id: string | null;
   metadata: string | null;
   last_message_at: string | null;
+  /**
+   * LINE event.timestamp (ms epoch) of the last join/leave applied. Guards
+   * membership transitions against out-of-order webhook redelivery: a stale
+   * join must not reactivate a target the bot has since left.
+   */
+  membership_updated_at: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -127,13 +133,17 @@ export interface UpsertLineTargetInput {
 }
 
 /**
- * Insert or reactivate a group/room target. Existing display_name/picture_url
+ * Insert or refresh a group/room target. Existing display_name/picture_url
  * are only overwritten when the input provides a non-null value (group summary
  * fetches are best-effort and must not blank out a previously known name).
  *
  * Single atomic statement: concurrent webhooks for the same unregistered
  * target must not race a SELECT→INSERT pair — the loser's INSERT would hit
  * the line_target_id UNIQUE constraint and drop its event.
+ *
+ * Deliberately does NOT touch is_active on existing rows: membership is
+ * driven by join/leave events via setLineTargetActive, and a redelivered
+ * message from before a leave must not reactivate a left target.
  */
 export async function upsertLineTarget(
   db: D1Database,
@@ -148,7 +158,6 @@ export async function upsertLineTarget(
          display_name = COALESCE(excluded.display_name, line_targets.display_name),
          picture_url = COALESCE(excluded.picture_url, line_targets.picture_url),
          line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
-         is_active = 1,
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -166,15 +175,27 @@ export async function upsertLineTarget(
   return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
 }
 
-/** Mark a target inactive (bot left / was removed from the group). */
+/**
+ * Apply a join/leave membership transition. `eventTimestamp` is the LINE
+ * event.timestamp (ms): LINE may redeliver webhook events out of order, so
+ * the update only applies when it is not older than the last applied
+ * transition — a stale join redelivered after a leave must not flip the
+ * target back to active (and re-open the 409 send guard).
+ */
 export async function setLineTargetActive(
   db: D1Database,
   lineTargetId: string,
   isActive: boolean,
+  eventTimestamp: number,
 ): Promise<void> {
   await db
-    .prepare(`UPDATE line_targets SET is_active = ?, updated_at = ? WHERE line_target_id = ?`)
-    .bind(isActive ? 1 : 0, jstNow(), lineTargetId)
+    .prepare(
+      `UPDATE line_targets
+       SET is_active = ?, membership_updated_at = ?, updated_at = ?
+       WHERE line_target_id = ?
+         AND (membership_updated_at IS NULL OR membership_updated_at <= ?)`,
+    )
+    .bind(isActive ? 1 : 0, eventTimestamp, jstNow(), lineTargetId, eventTimestamp)
     .run();
 }
 
