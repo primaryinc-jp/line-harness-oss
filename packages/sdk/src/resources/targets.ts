@@ -64,11 +64,17 @@ export class TargetsResource {
   async getConversation(
     targetType: TargetType,
     targetId: string,
-    params?: { limit?: number; before?: string },
+    params?: {
+      limit?: number
+      before?: string
+      /** Id of the message `before` came from — composite cursor so messages sharing a timestamp are not skipped across pages. */
+      beforeId?: string
+    },
   ): Promise<TargetConversation> {
     const query = new URLSearchParams()
     if (params?.limit !== undefined) query.set('limit', String(params.limit))
     if (params?.before !== undefined) query.set('before', params.before)
+    if (params?.beforeId !== undefined) query.set('beforeId', params.beforeId)
     const qs = query.toString()
     const base = `/api/conversations/${targetType}/${encodeURIComponent(targetId)}`
     const res = await this.http.get<ApiResponse<TargetConversation>>(qs ? `${base}?${qs}` : base)

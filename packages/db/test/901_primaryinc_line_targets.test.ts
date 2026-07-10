@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -254,6 +254,38 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(second).toBe(first);
     const count = db.prepare(`SELECT COUNT(*) AS c FROM target_messages_log`).get() as { c: number };
     expect(count.c).toBe(1);
+  });
+
+  it('paginates through messages sharing one created_at without loss (composite cursor)', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    // Four messages: three share the same event timestamp (LINE event.timestamp
+    // has ms precision — simultaneous group messages are realistic), one older
+    const ts = Date.UTC(2026, 6, 10, 2, 0, 0);
+    for (const [n, at] of [['m1', ts], ['m2', ts], ['m3', ts], ['m0', ts - 60_000]] as const) {
+      await logTargetMessage(d1, {
+        targetId: target.id, direction: 'incoming', messageType: 'text',
+        content: n, lineMessageId: n, occurredAt: at,
+      });
+    }
+
+    // Page size 2 → the tie of three straddles the page boundary
+    const page1 = await getTargetMessages(d1, target.id, { limit: 2 });
+    expect(page1).toHaveLength(2);
+    const cursor = page1[page1.length - 1];
+
+    // Timestamp-only cursor would skip the remaining tied message entirely;
+    // the composite (before, beforeId) cursor must return it
+    const page2 = await getTargetMessages(d1, target.id, {
+      limit: 2, before: cursor.created_at, beforeId: cursor.id,
+    });
+    const all = [...page1, ...page2];
+    expect(all).toHaveLength(4);
+    // No duplicates, no losses
+    expect(new Set(all.map((m) => m.id)).size).toBe(4);
+    expect(all.map((m) => m.content).sort()).toEqual(['m0', 'm1', 'm2', 'm3']);
+    // Deterministic order: ties resolved by id DESC, older message last
+    expect(all[3].content).toBe('m0');
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {

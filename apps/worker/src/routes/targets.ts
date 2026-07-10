@@ -200,7 +200,7 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
   }
 });
 
-// GET /api/conversations/:targetType/:targetId?limit=&before=
+// GET /api/conversations/:targetType/:targetId?limit=&before=&beforeId=
 // Group/room conversation thread. Two path segments, so this never collides
 // with the friend thread route GET /api/conversations/:friendId.
 targets.get('/api/conversations/:targetType/:targetId', async (c) => {
@@ -220,7 +220,11 @@ targets.get('/api/conversations/:targetType/:targetId', async (c) => {
       return c.json({ success: false, error: 'limit must be an integer 1..200' }, 400);
     }
     const before = c.req.query('before') ?? null;
-    const messages = await getTargetMessages(db, target.id, { limit, before });
+    // beforeId makes the cursor composite (created_at, id): created_at is the
+    // LINE event time, so ties can straddle a page boundary. Pass the id of
+    // the oldest message from the previous page together with its createdAt.
+    const beforeId = c.req.query('beforeId') ?? null;
+    const messages = await getTargetMessages(db, target.id, { limit, before, beforeId });
 
     return c.json({
       success: true,

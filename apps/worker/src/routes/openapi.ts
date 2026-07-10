@@ -249,6 +249,7 @@ const spec = {
           { name: 'targetId', in: 'path', required: true, schema: { type: 'string' } },
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
           { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' } },
+          { name: 'beforeId', in: 'query', schema: { type: 'string' }, description: '前ページ最古メッセージの id（before と併用する複合カーソル）' },
         ],
         responses: { '200': { description: 'Target + messages (ASC)' }, '404': { description: 'Not found' } },
       },

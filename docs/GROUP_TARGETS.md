@@ -24,7 +24,9 @@ join 時と名前未取得時に LINE の group summary API から best-effort �
 （`senderLineUserId` / `senderDisplayName`）付きで記録される。
 `created_at` には LINE の `event.timestamp`（実発言時刻）を使い、
 target の `lastMessageAt` は単調増加（遅延・再配信された古い発言で
-最新扱いにならない）。同時刻は `id` を tie-breaker に決定的に並ぶ。
+最新扱いにならない）。同時刻は `id` を tie-breaker に決定的に並ぶ。ページングは前ページ最古
+メッセージの `createdAt` + `id` を `before` / `beforeId` として渡す複合
+カーソル（同一時刻がページ境界をまたいでも欠落しない）。
 LINE の webhook 再送（redelivery）は LINE message ID
 （`(target_id, line_message_id)` の UNIQUE 制約）で冪等に排除される。
 自動返信・シナリオはグループには適用されない（friend 専用のまま）。
@@ -40,6 +42,7 @@ GET  /api/targets?metadata.salesCustomerPageId=...   # 顧客/商談からの逆
 GET  /api/targets/:targetType/:targetId              # 参加者（発言者由来）つき詳細
 PUT  /api/targets/:targetType/:targetId/metadata     # friend metadata と同じマージ更新
 GET  /api/conversations/:targetType/:targetId        # 会話取得（発言者付き、ASC）
+     ?limit=&before=&beforeId=                       # ページングは (createdAt, id) の複合カーソル
 POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 ```
 

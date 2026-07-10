@@ -27,8 +27,14 @@ export function registerGetConversation(server: McpServer): void {
         .string()
         .optional()
         .describe("Return messages before this timestamp (ISO8601, for pagination)"),
+      beforeId: z
+        .string()
+        .optional()
+        .describe(
+          "Id of the oldest message from the previous page (pass together with its createdAt as `before`). Group/room messages can share a timestamp; the composite cursor prevents skipping ties across pages.",
+        ),
     },
-    async ({ friendId, targetType, targetId, limit, before }) => {
+    async ({ friendId, targetType, targetId, limit, before, beforeId }) => {
       try {
         const client = getClient();
         // Same exactly-one destination contract as send_message: ambiguous or
@@ -43,7 +49,7 @@ export function registerGetConversation(server: McpServer): void {
           throw new Error("targetType and targetId must both be provided to read a group/room conversation");
         }
         if (targetType && targetId) {
-          const targetResult = await client.targets.getConversation(targetType, targetId, { limit, before });
+          const targetResult = await client.targets.getConversation(targetType, targetId, { limit, before, beforeId });
           return {
             content: [
               {

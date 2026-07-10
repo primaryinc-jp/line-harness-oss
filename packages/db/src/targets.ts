@@ -329,6 +329,14 @@ export async function logTargetMessage(
 export interface GetTargetMessagesOptions {
   limit?: number;
   before?: string | null;
+  /**
+   * Id of the message the `before` timestamp came from (the last row of the
+   * previous page). Makes the cursor composite (created_at, id): created_at is
+   * LINE event.timestamp, so several messages can share one timestamp, and a
+   * timestamp-only cursor would skip the rest of a tie that straddles a page
+   * boundary. Without it, ties at `before` are excluded (legacy behavior).
+   */
+  beforeId?: string | null;
 }
 
 export async function getTargetMessages(
@@ -336,21 +344,35 @@ export async function getTargetMessages(
   targetId: string,
   opts: GetTargetMessagesOptions = {},
 ): Promise<TargetMessage[]> {
-  const { limit = 50, before = null } = opts;
+  const { limit = 50, before = null, beforeId = null } = opts;
   // julianday() cursor: preserves sub-second precision and sorts ISO 8601
   // cursors in any timezone form correctly against stored +09:00 timestamps
   // (same rationale as GET /api/conversations/:friendId).
   // `id DESC` tie-breaker: created_at comes from LINE event.timestamp (ms), so
   // simultaneous messages are possible; ordering must stay deterministic
-  // across pagination requests.
-  const sql = before
-    ? `SELECT * FROM target_messages_log
+  // across pagination requests, and the cursor must be composite
+  // ((created_at, id) < (before, beforeId)) so ties straddling a page
+  // boundary are not skipped.
+  let sql: string;
+  let binds: (string | number)[];
+  if (before && beforeId) {
+    sql = `SELECT * FROM target_messages_log
+       WHERE target_id = ?
+         AND (julianday(created_at) < julianday(?)
+              OR (julianday(created_at) = julianday(?) AND id < ?))
+       ORDER BY created_at DESC, id DESC LIMIT ?`;
+    binds = [targetId, before, before, beforeId, limit];
+  } else if (before) {
+    sql = `SELECT * FROM target_messages_log
        WHERE target_id = ? AND julianday(created_at) < julianday(?)
-       ORDER BY created_at DESC, id DESC LIMIT ?`
-    : `SELECT * FROM target_messages_log
+       ORDER BY created_at DESC, id DESC LIMIT ?`;
+    binds = [targetId, before, limit];
+  } else {
+    sql = `SELECT * FROM target_messages_log
        WHERE target_id = ?
        ORDER BY created_at DESC, id DESC LIMIT ?`;
-  const binds: (string | number)[] = before ? [targetId, before, limit] : [targetId, limit];
+    binds = [targetId, limit];
+  }
   const result = await db.prepare(sql).bind(...binds).all<TargetMessage>();
   return result.results;
 }
