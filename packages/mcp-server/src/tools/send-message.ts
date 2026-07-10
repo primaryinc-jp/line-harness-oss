@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getClient } from "../client.js";
-import { autoTrackUrls } from "./auto-track-urls.js";
 
 export function registerSendMessage(server: McpServer): void {
   server.tool(
@@ -55,7 +54,7 @@ export function registerSendMessage(server: McpServer): void {
         .boolean()
         .default(true)
         .describe(
-          "Wrap URLs in the message with tracked short links (done server-side, per LINE account). Set false to send URLs as-is.",
+          "Set false to disable automatic URL shortening (/t/ tracking links, created server-side per LINE account). URLs are sent as-is. Default true.",
         ),
     },
     async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId, trackLinks }) => {
@@ -104,45 +103,28 @@ export function registerSendMessage(server: McpServer): void {
           }
         }
 
+        // URL の短縮 (auto-track) は worker が送信時に行う (friend/target の所属
+        // アカウント付きでリンクを所有させるため、ここでは変換しない)。
+        // trackLinks=false は API に渡して worker 側の短縮もスキップさせる。
         const senderSelection = senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined;
-        let result: { messageId: string };
-        if (targetType && targetId) {
-          // Link tracking for targets happens server-side in the worker
-          // (per-account short links) — no MCP-side pre-tracking, matching the
-          // upstream trackLinks contract.
-          result = await client.targets.sendMessage(
-            targetType,
-            targetId,
-            finalContent,
-            messageType,
-            altText,
-            senderSelection,
-            { trackLinks },
-          );
-        } else {
-          // Friend path keeps the legacy MCP-side URL auto-tracking while
-          // trackLinks is on; trackLinks:false skips it and is forwarded to
-          // the worker so server-side tracking is disabled too (upstream
-          // trackLinks contract).
-          let friendContent = finalContent;
-          if (trackLinks) {
-            const { content: trackedContent } = await autoTrackUrls(
-              client,
+        const result = targetType && targetId
+          ? await client.targets.sendMessage(
+              targetType,
+              targetId,
               finalContent,
               messageType,
-              `DM to ${friendId!.slice(0, 8)}`,
+              altText,
+              senderSelection,
+              { trackLinks },
+            )
+          : await client.friends.sendMessage(
+              friendId!,
+              finalContent,
+              messageType,
+              altText,
+              senderSelection,
+              { trackLinks },
             );
-            friendContent = trackedContent;
-          }
-          result = await client.friends.sendMessage(
-            friendId!,
-            friendContent,
-            messageType,
-            altText,
-            senderSelection,
-            { trackLinks },
-          );
-        }
         return {
           content: [
             {

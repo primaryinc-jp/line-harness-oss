@@ -119,7 +119,7 @@ database_id = "ここに貼り付け"
 
 ```bash
 # 本番D1にスキーマ適用
-npx wrangler d1 execute line-crm --file=packages/db/schema.sql
+npx wrangler d1 execute your-database --file=packages/db/schema.sql
 
 # ローカルD1にスキーマ適用（開発用）
 pnpm db:migrate:local
@@ -322,4 +322,4 @@ await client.friends.addTag(friends.items[0].id, tag.id)
 | PC から QR で友だち追加できない／"Invalid redirect_uri" | LINE Login チャネルに Callback URL 未登録 | LINE Login チャネル → 「LINEログイン設定」タブ → 「ウェブアプリでLINEログインを利用する」ON → 「Callback URL」に `{worker}/auth/callback` を貼る |
 | スマホで動くのに PC で動かない | 同上（LIFF はスマホで OAuth Callback 経由しない、PC は経由する） | 同上 |
 | Cron が動かない | wrangler.toml に crons 未設定 | `[triggers] crons = ["*/5 * * * *"]` を確認 |
-| CORS エラー | origin 不一致 | Workers は `origin: '*'` で全許可（MVP） |
+| CORS エラー | 管理画面の Origin が Worker の `ADMIN_ORIGIN` 許可リストに入っていない | `npx create-line-harness@latest update` を実行。Cloudflare Pages の本番URL / 同じプロジェクトのプレビューURLは許可されます。別ドメインで開いている場合は Worker の `ADMIN_ORIGIN` を実際の管理画面URLに更新 |

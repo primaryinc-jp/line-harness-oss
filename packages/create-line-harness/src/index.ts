@@ -7,20 +7,30 @@ import { ensureRepo } from "./steps/clone-repo.js";
 
 const args = process.argv.slice(2);
 
-function parseArgs(): { command: string; repoDir: string | null } {
+function parseArgs(): {
+  command: string;
+  repoDir: string | null;
+  fromSource: boolean;
+} {
   let command = "setup";
   let repoDir: string | null = null;
+  let fromSource = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--repo-dir" && args[i + 1]) {
       repoDir = resolve(args[i + 1]);
       i++;
+    } else if (args[i] === "--from-source") {
+      // Dev escape hatch: build + deploy from the cloned source instead of
+      // the official release bundle. The install reports 0.0.0-dev and is
+      // excluded from automatic updates.
+      fromSource = true;
     } else if (!args[i].startsWith("-")) {
       command = args[i];
     }
   }
 
-  return { command, repoDir };
+  return { command, repoDir, fromSource };
 }
 
 /**
@@ -50,7 +60,7 @@ function getConfigDir(explicitRepoDir: string | null): string {
 }
 
 async function main(): Promise<void> {
-  const { command, repoDir: explicitRepoDir } = parseArgs();
+  const { command, repoDir: explicitRepoDir, fromSource } = parseArgs();
 
   let repoDir: string;
   if (command === "update") {
@@ -64,12 +74,14 @@ async function main(): Promise<void> {
   }
 
   if (command === "setup") {
-    await runSetup(repoDir);
+    await runSetup(repoDir, { fromSource });
   } else if (command === "update") {
     await runUpdate(repoDir);
   } else {
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: create-line-harness [setup|update] [--repo-dir <path>]");
+    console.error(
+      "Usage: create-line-harness [setup|update] [--repo-dir <path>] [--from-source]",
+    );
     process.exit(1);
   }
 }

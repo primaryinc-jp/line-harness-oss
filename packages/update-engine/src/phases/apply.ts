@@ -4,6 +4,15 @@ import type { ParsedBundle } from '../bundle.js';
 import { executeD1Query } from '../cf-api/d1.js';
 import { listWorkerBindings, putWorkerScript } from '../cf-api/workers.js';
 import { deployPagesProject } from '../cf-api/pages.js';
+import { materializeAdminFiles } from '../materialize.js';
+
+/**
+ * Compatibility flags the LINE Harness Worker requires. The script upload
+ * API replaces metadata wholesale, so these must be re-sent on every PUT —
+ * omitting them would strip `nodejs_compat` and break `node:*` imports.
+ * Kept in lockstep with apps/worker/wrangler.toml.
+ */
+const WORKER_COMPATIBILITY_FLAGS = ['nodejs_compat'];
 
 /**
  * Result of a successful apply phase.
@@ -77,6 +86,11 @@ export async function runApply(
     scriptName: ctx.workerName,
     scriptContent: bundle.workerJs,
     bindings,
+    compatibilityFlags: WORKER_COMPATIBILITY_FLAGS,
+    // The release bundle carries no Worker asset files. CLI installs serve
+    // the LIFF SPA from Workers Assets, so the previous version's assets
+    // must survive this script upload. No-op for installs without assets.
+    keepAssets: true,
   });
   await ev.emit({
     step: 'worker',
@@ -86,11 +100,16 @@ export async function runApply(
 
   // Step 3: Admin Pages. Done before LIFF because admin is internal-only
   // and any breakage here is contained — LIFF is what customers see.
+  // The bundle's admin build has `https://__LH_WORKER_URL__` baked in as
+  // its API origin; rewrite it to this install's Worker URL first.
   await ev.emit({ step: 'admin', status: 'running' });
+  const adminFiles = ctx.workerPublicUrl
+    ? materializeAdminFiles(bundle.adminFiles, ctx.workerPublicUrl)
+    : bundle.adminFiles;
   const adminResult = await deployPagesProject({
     creds: ctx.creds,
     projectName: ctx.adminPagesProject,
-    files: bundle.adminFiles,
+    files: adminFiles,
   });
   await ev.emit({
     step: 'admin',
@@ -100,7 +119,17 @@ export async function runApply(
 
   // Step 4: LIFF Pages. Last so the customer-facing UI swap only happens
   // once everything beneath it (schema + Worker + admin) is already
-  // live on the new version.
+  // live on the new version. Skipped entirely for CLI installs
+  // (liffPagesProject === ''), where the LIFF SPA is served by the Worker's
+  // own assets and there is no Pages project to deploy to.
+  if (!ctx.liffPagesProject) {
+    await ev.emit({ step: 'liff', status: 'done', name: 'skipped (worker-assets install)' });
+    return {
+      adminDeploymentId: adminResult.deploymentId,
+      liffDeploymentId: '',
+    };
+  }
+
   await ev.emit({ step: 'liff', status: 'running' });
   const liffResult = await deployPagesProject({
     creds: ctx.creds,

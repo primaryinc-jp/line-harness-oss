@@ -3,7 +3,7 @@ import type { UpdateContext, UpdateEvent } from './types.js';
 import {
   parseBundleStream,
   verifyBundleHashes,
-  assertHashesMatch,
+  verifyBundleIntegrity,
 } from './bundle.js';
 import { getLatestDeployment } from './cf-api/pages.js';
 import {
@@ -24,6 +24,7 @@ export * from './types.js';
 export * from './manifest.js';
 export * from './fork-detect.js';
 export * from './bundle.js';
+export * from './materialize.js';
 export * from './snapshot.js';
 export * from './cf-api/workers.js';
 export * from './cf-api/pages.js';
@@ -133,9 +134,14 @@ export async function runUpdate(opts: RunUpdateOpts): Promise<UpdateHandle> {
   //
   // Failures here reject the OUTER promise — no snapshot row exists yet,
   // so the caller's catch is the only place that learns about the error.
+  // Worker-assets installs have no LIFF Pages project (empty string) —
+  // their LIFF is served by the Worker script, whose pre-update bytes are
+  // already captured via currentWorkerBundleUrl.
   const [adminLatest, liffLatest] = await Promise.all([
     getLatestDeployment({ creds: ctx.creds, projectName: ctx.adminPagesProject }),
-    getLatestDeployment({ creds: ctx.creds, projectName: ctx.liffPagesProject }),
+    ctx.liffPagesProject
+      ? getLatestDeployment({ creds: ctx.creds, projectName: ctx.liffPagesProject })
+      : Promise.resolve({ id: '' }),
   ]);
 
   // Step 2: create the snapshot row. From here every failure path is
@@ -185,7 +191,10 @@ export async function runUpdate(opts: RunUpdateOpts): Promise<UpdateHandle> {
         Readable.fromWeb(res.body as any),
       );
       const computed = verifyBundleHashes(bundle);
-      assertHashesMatch(computed, ctx.target);
+      // Byte-verify against worker_bundle_hash (detached final-artifact
+      // hash). Releases without it shipped undeployable worker stubs and
+      // are rejected here before any destructive step.
+      verifyBundleIntegrity(computed, ctx.target);
 
       // Step 6: apply (destructive).
       await runApply(ctx, bundle, ev);
@@ -212,17 +221,19 @@ export async function runUpdate(opts: RunUpdateOpts): Promise<UpdateHandle> {
       });
       try {
         const snap = await getSnapshot(d1, updateId);
+        // snapshot_liff_deployment is intentionally NOT required — it is
+        // empty for worker-assets installs, whose LIFF is restored by the
+        // Worker script rollback itself.
         if (
           snap?.snapshot_worker_url &&
-          snap.snapshot_admin_deployment &&
-          snap.snapshot_liff_deployment
+          snap.snapshot_admin_deployment
         ) {
           await runRollback(
             ctx,
             {
               snapshotWorkerBundleUrl: snap.snapshot_worker_url,
               snapshotAdminDeployment: snap.snapshot_admin_deployment,
-              snapshotLiffDeployment: snap.snapshot_liff_deployment,
+              snapshotLiffDeployment: snap.snapshot_liff_deployment ?? '',
             },
             ev,
           );

@@ -44,7 +44,17 @@ export class FriendsResource {
     await this.http.delete(`/api/friends/${friendId}/tags/${tagId}`)
   }
 
-  async sendMessage(friendId: string, content: string, messageType: MessageType = 'text', altText?: string, sender?: MessageSenderSelection, options?: { trackLinks?: boolean }): Promise<{ messageId: string }> {
+  // Fork extension: `sender` selects the staff sender identity
+  // (feat/message-sender-per-staff); upstream's signature is
+  // (friendId, content, messageType, altText, options).
+  async sendMessage(
+    friendId: string,
+    content: string,
+    messageType: MessageType = 'text',
+    altText?: string,
+    sender?: MessageSenderSelection,
+    options?: { trackLinks?: boolean },
+  ): Promise<{ messageId: string }> {
     const res = await this.http.post<ApiResponse<{ messageId: string }>>(`/api/friends/${friendId}/messages`, {
       messageType,
       content,

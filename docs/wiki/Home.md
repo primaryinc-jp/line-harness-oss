@@ -104,7 +104,7 @@ LINE Harness は、LINE公式アカウント向けのオープンソース CRM /
 21. **[Operations](22-Operations.md)** — 運用、監視、トラブルシューティング
 22. **[Claude Code Integration](23-Claude-Code-Integration.md)** — AI連携、プロンプト例
 23. **[MCP Server](24-MCP-Server.md)** — MCP Server セットアップ、ツール一覧、URL自動追跡
-24. **[Release Notes](Release-Notes.md)** — リリース履歴、検証内容、同期メモ
+27. **[Affiliate ASP](27-Affiliate-ASP.md)** — セルフサーブ型アフィリエイト計測、last-touch帰属、重複フラグ、API
 
 ## D1テーブル一覧（42テーブル）
 

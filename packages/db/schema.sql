@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS friends (
   user_id          TEXT,
   ig_igsid         TEXT,
   score            INTEGER NOT NULL DEFAULT 0,
+  last_ref_code    TEXT,
+  last_ref_at      TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
@@ -123,7 +125,8 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   dedup_priority     TEXT CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)),
   failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)),
   dedup_progress     TEXT CHECK (dedup_progress IS NULL OR json_valid(dedup_progress)),
-  batch_lock_at      TEXT
+  batch_lock_at      TEXT,
+  track_links        INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts (status);
@@ -239,17 +242,20 @@ CREATE INDEX IF NOT EXISTS idx_users_external_id ON users (external_id);
 -- Round 2: LINE Account Management (Multi-Account)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS line_accounts (
-  id                   TEXT PRIMARY KEY,
-  channel_id           TEXT NOT NULL UNIQUE,
-  name                 TEXT NOT NULL,
-  channel_access_token TEXT NOT NULL,
-  channel_secret       TEXT NOT NULL,
-  is_active            INTEGER NOT NULL DEFAULT 1,
-  country              TEXT,
-  role                 TEXT,
-  display_order        INTEGER NOT NULL DEFAULT 0,
-  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+  id                     TEXT PRIMARY KEY,
+  channel_id             TEXT NOT NULL UNIQUE,
+  name                   TEXT NOT NULL,
+  channel_access_token   TEXT NOT NULL,
+  channel_secret         TEXT NOT NULL,
+  is_active              INTEGER NOT NULL DEFAULT 1,
+  country                TEXT,
+  role                   TEXT,
+  display_order          INTEGER NOT NULL DEFAULT 0,
+  og_site_name           TEXT,
+  og_default_image_url   TEXT,
+  og_default_description TEXT,
+  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_line_accounts_display_order
@@ -270,13 +276,17 @@ CREATE TABLE IF NOT EXISTS conversion_points (
 -- Round 2: Conversion Events (CV Records)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS conversion_events (
-  id                  TEXT PRIMARY KEY,
-  conversion_point_id TEXT NOT NULL REFERENCES conversion_points (id) ON DELETE CASCADE,
-  friend_id           TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
-  user_id             TEXT,
-  affiliate_code      TEXT,
-  metadata            TEXT,
-  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+  id                   TEXT PRIMARY KEY,
+  conversion_point_id  TEXT NOT NULL REFERENCES conversion_points (id) ON DELETE CASCADE,
+  friend_id            TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
+  user_id              TEXT,
+  affiliate_code       TEXT,
+  metadata             TEXT,
+  affiliate_id         TEXT REFERENCES affiliates (id),
+  attributed_ref_code  TEXT,
+  approval_status      TEXT CHECK (approval_status IN ('pending','approved','rejected')),
+  approved_at          TEXT,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversion_events_point ON conversion_events (conversion_point_id);
@@ -292,8 +302,45 @@ CREATE TABLE IF NOT EXISTS affiliates (
   code            TEXT NOT NULL UNIQUE,
   commission_rate REAL NOT NULL DEFAULT 0,
   is_active       INTEGER NOT NULL DEFAULT 1,
+  friend_id       TEXT REFERENCES friends (id),
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliates_friend ON affiliates (friend_id) WHERE friend_id IS NOT NULL;
+
+-- ============================================================
+-- Round 2: Affiliate Offers (案件) (migration 047)
+-- Must be defined before affiliate_links so the offer_id FK resolves.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS affiliate_offers (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  description     TEXT,
+  reward_amount   INTEGER NOT NULL DEFAULT 0,
+  line_account_id TEXT REFERENCES line_accounts (id),
+  tag_id          TEXT REFERENCES tags (id),
+  scenario_id     TEXT REFERENCES scenarios (id),
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL
+);
+
+-- ============================================================
+-- Round 2: Affiliate Self-Serve Links (migration 046)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS affiliate_links (
+  id              TEXT PRIMARY KEY,
+  affiliate_id    TEXT NOT NULL REFERENCES affiliates (id),
+  ref_code        TEXT NOT NULL UNIQUE,
+  label           TEXT,
+  line_account_id TEXT REFERENCES line_accounts (id),
+  offer_id        TEXT REFERENCES affiliate_offers (id),
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL,
+  click_count     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_affiliate_links_affiliate ON affiliate_links (affiliate_id);
+CREATE INDEX IF NOT EXISTS idx_affiliate_links_offer ON affiliate_links (offer_id);
 
 -- ============================================================
 -- Round 2: Affiliate Clicks
@@ -472,7 +519,43 @@ CREATE TABLE IF NOT EXISTS chats (
   updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_chats_friend ON chats (friend_id);
+-- 1 friend = 1 chat 行 (048_chats_friend_unique)。
+-- schema.sql は既存 DB への差分適用 (pnpm db:migrate) にも使われるため、UNIQUE
+-- インデックス作成前に旧重複行を最新行へ寄せる。新規 DB では no-op。
+-- マージ規則は migrations/048_chats_friend_unique.sql と同一に保つこと。
+UPDATE chats SET
+  status = (
+    SELECT c2.status FROM chats c2
+    WHERE c2.friend_id = chats.friend_id
+    ORDER BY c2.updated_at DESC, c2.rowid DESC LIMIT 1
+  ),
+  operator_id = (
+    SELECT c2.operator_id FROM chats c2
+    WHERE c2.friend_id = chats.friend_id AND c2.operator_id IS NOT NULL
+    ORDER BY c2.updated_at DESC, c2.rowid DESC LIMIT 1
+  ),
+  notes = (
+    SELECT c2.notes FROM chats c2
+    WHERE c2.friend_id = chats.friend_id AND c2.notes IS NOT NULL
+    ORDER BY c2.updated_at DESC, c2.rowid DESC LIMIT 1
+  ),
+  last_message_at = (
+    SELECT MAX(c2.last_message_at) FROM chats c2
+    WHERE c2.friend_id = chats.friend_id
+  )
+WHERE EXISTS (
+  SELECT 1 FROM chats c2
+  WHERE c2.friend_id = chats.friend_id AND c2.rowid != chats.rowid
+);
+DELETE FROM chats
+WHERE EXISTS (
+  SELECT 1 FROM chats c2
+  WHERE c2.friend_id = chats.friend_id
+    AND (c2.created_at > chats.created_at
+         OR (c2.created_at = chats.created_at AND c2.rowid > chats.rowid))
+);
+DROP INDEX IF EXISTS idx_chats_friend;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_friend_unique ON chats (friend_id);
 CREATE INDEX IF NOT EXISTS idx_chats_operator ON chats (operator_id);
 CREATE INDEX IF NOT EXISTS idx_chats_status ON chats (status);
 
@@ -673,9 +756,11 @@ CREATE TABLE IF NOT EXISTS menus (
   sort_order            INTEGER NOT NULL DEFAULT 0,
   is_active             INTEGER NOT NULL DEFAULT 1,
   deleted_at            TEXT,
+  auto_tag_id           TEXT,                  -- 予約申込時に friend に自動付与するタグ
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id)
+  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
+  FOREIGN KEY (auto_tag_id) REFERENCES tags(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_menus_account_sort ON menus (line_account_id, sort_order);
 

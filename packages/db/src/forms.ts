@@ -18,6 +18,9 @@ export interface Form {
   save_to_metadata: number;
   is_active: number;
   submit_count: number;
+  og_title: string | null;
+  og_description: string | null;
+  og_image_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -116,6 +119,9 @@ export interface CreateFormInput {
   onSubmitWebhookHeaders?: string | null;
   onSubmitWebhookFailMessage?: string | null;
   saveToMetadata?: boolean;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogImageUrl?: string | null;
 }
 
 export async function createForm(db: D1Database, input: CreateFormInput): Promise<Form> {
@@ -128,8 +134,10 @@ export async function createForm(db: D1Database, input: CreateFormInput): Promis
          (id, name, description, fields, on_submit_tag_id, on_submit_scenario_id,
           on_submit_message_type, on_submit_message_content,
           on_submit_webhook_url, on_submit_webhook_headers, on_submit_webhook_fail_message,
-          save_to_metadata, is_active, submit_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+          save_to_metadata, is_active, submit_count,
+          og_title, og_description, og_image_url,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -144,6 +152,9 @@ export async function createForm(db: D1Database, input: CreateFormInput): Promis
       input.onSubmitWebhookHeaders ?? null,
       input.onSubmitWebhookFailMessage ?? null,
       input.saveToMetadata !== false ? 1 : 0,
+      input.ogTitle ?? null,
+      input.ogDescription ?? null,
+      input.ogImageUrl ?? null,
       now,
       now,
     )
@@ -165,6 +176,9 @@ export interface UpdateFormInput {
   onSubmitWebhookFailMessage?: string | null;
   saveToMetadata?: boolean;
   isActive?: boolean;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogImageUrl?: string | null;
 }
 
 export async function updateForm(
@@ -192,6 +206,9 @@ export async function updateForm(
            on_submit_webhook_fail_message = ?,
            save_to_metadata = ?,
            is_active = ?,
+           og_title = ?,
+           og_description = ?,
+           og_image_url = ?,
            updated_at = ?
        WHERE id = ?`,
     )
@@ -222,6 +239,9 @@ export async function updateForm(
         ? (input.saveToMetadata !== false ? 1 : 0)
         : existing.save_to_metadata,
       'isActive' in input ? (input.isActive ? 1 : 0) : existing.is_active,
+      'ogTitle' in input ? (input.ogTitle ?? null) : existing.og_title,
+      'ogDescription' in input ? (input.ogDescription ?? null) : existing.og_description,
+      'ogImageUrl' in input ? (input.ogImageUrl ?? null) : existing.og_image_url,
       now,
       id,
     )

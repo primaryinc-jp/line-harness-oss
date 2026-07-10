@@ -13,10 +13,12 @@
  *   ?redirect=x       — redirect after linking (for wrapped URLs)
  *   ?page=book        — booking page (calendar slot picker, Google Calendar)
  *   ?page=salon-book  — salon booking flow (React, dynamic-imported)
+ *   ?page=affiliate   — affiliate self-serve page (React, dynamic-imported)
  */
 
 import { initBooking } from './booking.js';
 import { initForm } from './form.js';
+import { safeRedirectTarget } from '../lib/safe-redirect.js';
 
 declare const liff: {
   init(config: { liffId: string }): Promise<void>;
@@ -24,6 +26,7 @@ declare const liff: {
   login(opts?: { redirectUri?: string }): void;
   getProfile(): Promise<{ userId: string; displayName: string; pictureUrl?: string; statusMessage?: string }>;
   getIDToken(): string | null;
+  getAccessToken(): string | null;
   getDecodedIDToken(): { sub: string; name?: string; email?: string; picture?: string } | null;
   getFriendship(): Promise<{ friendFlag: boolean }>;
   isInClient(): boolean;
@@ -63,7 +66,11 @@ function getPage(): string | null {
 
 function getRedirectUrl(): string | null {
   const params = new URLSearchParams(window.location.search);
-  return params.get('redirect');
+  // Guard the client-side navigation sink (window.location.href below) against
+  // open-redirect / javascript: abuse, mirroring the server-side /auth/callback
+  // guard. A directly-crafted LIFF URL never reaches the server route, so the
+  // client must validate too.
+  return safeRedirectTarget(params.get('redirect'));
 }
 
 function getRef(): string | null {
@@ -125,6 +132,34 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
       const { friendFlag } = await liff.getFriendship();
       if (!friendFlag) return;
 
+      // Re-link now that the friends row exists. For first-time users the
+      // pre-add POST in linkAndAddFlow ran before the follow webhook created
+      // the friends row (404), dropping ref/ig/iga/igan attribution on the
+      // no-form path — this retry persists it once friendship is confirmed.
+      try {
+        const idToken = liff.getIDToken();
+        if (idToken) {
+          const fp = await liff.getProfile();
+          const params = new URLSearchParams(window.location.search);
+          const res = await apiCall('/api/liff/link', {
+            method: 'POST',
+            body: JSON.stringify({
+              idToken,
+              displayName: fp.displayName,
+              existingUuid: getSavedUuid(),
+              ref: getRef() || undefined,
+              ig: params.get('ig') || undefined,
+              iga: params.get('iga') || undefined,
+              igan: params.get('igan') || undefined,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json() as { success: boolean; data?: { userId?: string } };
+            if (data?.data?.userId) saveUuid(data.data.userId);
+          }
+        }
+      } catch { /* best-effort */ }
+
       // Send form link if form param exists (was lost during friend-add flow)
       const formParam = new URLSearchParams(window.location.search).get('form');
       if (formParam && !formLinkSent) {
@@ -143,6 +178,8 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
               gate: params.get('gate') || '',
               xh: params.get('xh') || '',
               ig: params.get('ig') || '',
+              iga: params.get('iga') || '',
+              igan: params.get('igan') || '',
             }),
           });
         } catch { /* best-effort */ }
@@ -222,6 +259,8 @@ async function linkAndAddFlow() {
         existingUuid: existingUuid,
         ref: ref,
         ig: linkParams.get('ig') || '',
+        iga: linkParams.get('iga') || '',
+        igan: linkParams.get('igan') || '',
       }),
     }).then(async (res) => {
       if (res.ok) {
@@ -284,6 +323,8 @@ async function linkAndAddFlow() {
               gate: params.get('gate') || '',
               xh: params.get('xh') || '',
               ig: params.get('ig') || '',
+              iga: params.get('iga') || '',
+              igan: params.get('igan') || '',
             }),
           });
         } catch { /* best-effort */ }
@@ -325,7 +366,10 @@ async function initSalonBooking(): Promise<void> {
 
   const existingUuid = getSavedUuid();
   const ref = getRef();
-  const ig = new URLSearchParams(window.location.search).get('ig');
+  const bookingParams = new URLSearchParams(window.location.search);
+  const ig = bookingParams.get('ig');
+  const iga = bookingParams.get('iga');
+  const igan = bookingParams.get('igan');
 
   // ② Silent UUID linking (fire-and-forget; booking API は id_token verify で
   //    認証するので待つ必要はない)。
@@ -337,6 +381,8 @@ async function initSalonBooking(): Promise<void> {
       existingUuid,
       ref: ref || undefined,
       ig: ig || undefined,
+      iga: iga || undefined,
+      igan: igan || undefined,
     }),
   })
     .then(async (res) => {
@@ -398,6 +444,7 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
 
   const existingUuid = getSavedUuid();
   const ref = getRef();
+  const eventParams = new URLSearchParams(window.location.search);
 
   // UUID linking (best-effort)
   apiCall('/api/liff/link', {
@@ -407,6 +454,9 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
       displayName: profile.displayName,
       existingUuid,
       ref: ref || undefined,
+      ig: eventParams.get('ig') || undefined,
+      iga: eventParams.get('iga') || undefined,
+      igan: eventParams.get('igan') || undefined,
     }),
   })
     .then(async (res) => {
@@ -443,6 +493,73 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
   mountEventBooking(container, ctx, initial);
 }
 
+// ─── Affiliate self-serve (React, dynamic-imported) ──────
+
+async function initAffiliate(): Promise<void> {
+  // salon-booking と同じ初期化シーケンス: profile/accessToken/friendship を
+  // 取得し、未友達なら friend-add gate、友達なら React mount。
+  //
+  // booking 系は id_token で verify するが、affiliate API は LINE access token
+  // (liff.getAccessToken()) を /oauth2/v2.1/verify + /v2/profile で検証するため
+  // ここでは accessToken を取り出して mount context に渡す。
+  const [profile, accessToken, friendship] = await Promise.all([
+    liff.getProfile(),
+    Promise.resolve(liff.getAccessToken()),
+    liff.getFriendship(),
+  ]);
+  if (!accessToken) {
+    showError('LINE 認証情報の取得に失敗しました。LINE アプリ内で再度開いてください。');
+    return;
+  }
+
+  const existingUuid = getSavedUuid();
+  const ref = getRef();
+  const affParams = new URLSearchParams(window.location.search);
+
+  // UUID linking (best-effort) — affiliate API は friends 行を要求するので、
+  // 未 link の初回利用者でも friend-add gate 通過後に行が存在するようにする。
+  apiCall('/api/liff/link', {
+    method: 'POST',
+    body: JSON.stringify({
+      idToken: liff.getIDToken(),
+      displayName: profile.displayName,
+      existingUuid,
+      ref: ref || undefined,
+      ig: affParams.get('ig') || undefined,
+      iga: affParams.get('iga') || undefined,
+      igan: affParams.get('igan') || undefined,
+    }),
+  })
+    .then(async (res) => {
+      if (res.ok) {
+        const data = (await res.json()) as { success: boolean; data?: { userId?: string } };
+        if (data?.data?.userId) saveUuid(data.data.userId);
+      }
+    })
+    .catch(() => {
+      /* silent */
+    });
+
+  // 未友達なら friend-add UI に流す。affiliate API は friends 行 (=友だち) を
+  // 要求するので、ここを skip すると /affiliate/me が friend_not_found で詰む。
+  if (!friendship.friendFlag) {
+    showFriendAdd(profile);
+    return;
+  }
+
+  const container = document.getElementById('app');
+  if (!container) {
+    showError('mount target #app が見つかりません');
+    return;
+  }
+  const { mountAffiliate } = await import('./affiliate/main.js');
+  mountAffiliate(container, {
+    liffId: LIFF_ID,
+    lineUserId: profile.userId,
+    lineAccessToken: accessToken,
+  });
+}
+
 // ─── Entry Point ────────────────────────────────────────
 
 async function main() {
@@ -474,6 +591,8 @@ async function main() {
       await initEventBooking('detail');
     } else if (page === 'event-me') {
       await initEventBooking('history');
+    } else if (page === 'affiliate') {
+      await initAffiliate();
     } else if (page === 'form') {
       const params = new URLSearchParams(window.location.search);
       const formId = params.get('id');

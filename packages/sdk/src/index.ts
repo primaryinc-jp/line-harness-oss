@@ -53,6 +53,7 @@ export type {
   LinkClick,
   TrackedLinkWithClicks,
   CreateTrackedLinkInput,
+  UpdateTrackedLinkInput,
   FormField,
   Form,
   CreateFormInput,

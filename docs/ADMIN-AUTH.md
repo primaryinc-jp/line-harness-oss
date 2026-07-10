@@ -58,6 +58,11 @@ three environment variables (see
 Cookies are `SameSite=None; Secure`; CSRF protects mutations; CORS is locked to
 the allowlist.
 
+Cloudflare Pages also prints per-deployment preview URLs such as
+`https://<hash>.<admin>.pages.dev`. Those preview origins are treated as the
+same admin Pages project, so clicking Wrangler's fresh deployment URL does not
+cause a login-time CORS failure.
+
 > ⚠️ Browsers are phasing out third-party cookies (Safari ITP blocks them
 > outright). For long-term robustness prefer option (b).
 

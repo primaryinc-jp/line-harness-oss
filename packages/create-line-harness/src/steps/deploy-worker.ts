@@ -1,6 +1,12 @@
 import * as p from "@clack/prompts";
-import { writeFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import {
+  writeFileSync,
+  existsSync,
+  readFileSync,
+  unlinkSync,
+  mkdirSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { execa } from "execa";
 import { wrangler, WranglerError } from "../lib/wrangler.js";
 import {
@@ -15,6 +21,10 @@ const RETRYABLE_NETWORK_ERROR =
   /fetch failed|connectivity issue|network connectivity|connection reset|socket hang up/i;
 const MAX_DEPLOY_ATTEMPTS = 3;
 
+/** Path (relative to apps/worker) where the official release Worker
+ *  artifact is placed. The generated wrangler.toml points main at it. */
+export const RELEASE_ARTIFACT_RELPATH = "dist/release/index.js";
+
 interface DeployWorkerOptions {
   repoDir: string;
   d1DatabaseId: string;
@@ -24,6 +34,13 @@ interface DeployWorkerOptions {
   liffId: string;
   botBasicId: string;
   r2BucketName: string;
+  /**
+   * Official release Worker bytes (bundle.tar.gz → worker/index.js).
+   * When set, the deploy ships THESE bytes via `no_bundle` so the Worker's
+   * baked-in version stamp matches the release manifest and `update` works.
+   * Absent only in `--from-source` mode (deploys 0.0.0-dev, no updates).
+   */
+  bundleWorkerJs?: Buffer;
 }
 
 interface DeployWorkerResult {
@@ -32,6 +49,18 @@ interface DeployWorkerResult {
 
 interface SyncInstalledWorkerConfigOptions extends InstalledWranglerConfig {
   repoDir: string;
+  /** See DeployWorkerOptions.bundleWorkerJs — refreshed before the final deploy. */
+  bundleWorkerJs?: Buffer;
+}
+
+/** Write the release Worker artifact into the clone. */
+export function writeReleaseArtifact(
+  workerDir: string,
+  bundleWorkerJs: Buffer,
+): void {
+  const artifactPath = join(workerDir, RELEASE_ARTIFACT_RELPATH);
+  mkdirSync(dirname(artifactPath), { recursive: true });
+  writeFileSync(artifactPath, bundleWorkerJs);
 }
 
 async function deployWorkerBundle(
@@ -129,18 +158,24 @@ export async function deployWorker(
     ? readFileSync(tomlPath, "utf-8")
     : null;
 
-  // Write deploy wrangler.toml
-  const deployToml = `name = "${options.workerName}"
-main = "src/index.ts"
-compatibility_date = "2024-12-01"
+  // Deploy config template. `main` differs between the build pass (the
+  // @cloudflare/vite-plugin needs the source entry to produce dist/client)
+  // and the bundle deploy pass (ships the official release artifact
+  // verbatim via no_bundle).
+  const renderDeployToml = (main: string, noBundle: boolean) => `name = "${options.workerName}"
+main = "${main}"
+${noBundle ? 'no_bundle = true\n' : ""}compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 account_id = "${options.accountId}"
 
-# Static assets (LIFF pages) served by Workers Assets
-# SPA fallback ensures all non-API paths serve index.html
+# Static assets (LIFF pages) served by Workers Assets.
+# Worker runs first so bot UAs get OGP HTML injection; normal UAs are
+# served the SPA via env.ASSETS.fetch() in the Worker's notFound handler.
 [assets]
-not_found_handling = "single-page-application"
+directory = "dist/client"
+binding = "ASSETS"
+run_worker_first = true
 
 [[d1_databases]]
 binding = "DB"
@@ -152,9 +187,11 @@ binding = "IMAGES"
 bucket_name = "${options.r2BucketName}"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "0 */6 * * *"]
 `;
-  writeFileSync(tomlPath, deployToml);
+
+  // Build pass config: vite needs the source entrypoint.
+  writeFileSync(tomlPath, renderDeployToml("src/index.ts", false));
 
   // Write .env for Vite build (LIFF client env vars)
   const envPath = join(workerDir, ".env");
@@ -183,6 +220,15 @@ crons = ["*/5 * * * *"]
     );
     await execa("npx", ["vite", "build"], { cwd: workerDir });
     buildSpinner.stop("Worker ビルド完了");
+
+    if (options.bundleWorkerJs) {
+      // Deploy the OFFICIAL release Worker bytes (not the local build).
+      // Their baked-in _version.ts stamp matches the release manifest, so
+      // `update`'s fork detection sees a vanilla install. The local vite
+      // build above still provides dist/client (the LIFF SPA assets).
+      writeReleaseArtifact(workerDir, options.bundleWorkerJs);
+      writeFileSync(tomlPath, renderDeployToml(RELEASE_ARTIFACT_RELPATH, true));
+    }
 
     // Pipe-first: capture deploy output so we can parse the real URL
     // (Cloudflare serves Workers at https://<worker>.<account-subdomain>.workers.dev,
@@ -217,6 +263,17 @@ export async function syncInstalledWorkerConfig(
 ): Promise<void> {
   const workerDir = join(options.repoDir, "apps/worker");
   const tomlPath = join(workerDir, "wrangler.toml");
+  if (options.workerDeployMode === "bundle") {
+    if (!options.bundleWorkerJs) {
+      throw new Error(
+        "internal: workerDeployMode=bundle なのに bundleWorkerJs がありません",
+      );
+    }
+    // This is the FINAL deploy of setup — make sure the artifact the
+    // generated toml points at is the release bytes (a resumed run may
+    // have a stale/absent dist/release/index.js).
+    writeReleaseArtifact(workerDir, options.bundleWorkerJs);
+  }
   writeFileSync(tomlPath, renderInstalledWranglerToml(options));
 
   const s = p.spinner();

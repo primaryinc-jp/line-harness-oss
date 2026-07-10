@@ -13,7 +13,11 @@ export interface VerifyUrls {
   workerHealthUrl: string;
   /** Admin Pages root URL (e.g. `https://admin.example.pages.dev/`). */
   adminUrl: string;
-  /** LIFF Pages root URL (e.g. `https://liff.example.pages.dev/`). */
+  /**
+   * LIFF Pages root URL (e.g. `https://liff.example.pages.dev/`), or ''
+   * for worker-assets installs — the LIFF probe is skipped when empty
+   * (the Worker /health probe already covers the serving script).
+   */
   liffUrl: string;
 }
 
@@ -80,12 +84,15 @@ export async function runVerify(
 
   // 4. LIFF Pages — customer-facing UI. Last because a failure here is
   //    the most "user visible" and we want the other probes to have
-  //    succeeded before we even report this one missing.
-  try {
-    await fetchWithRetry(urls.liffUrl);
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    throw new Error(`LIFF URL failed: ${reason} (${urls.liffUrl})`);
+  //    succeeded before we even report this one missing. Skipped for
+  //    worker-assets installs (no separate LIFF deployment to probe).
+  if (urls.liffUrl) {
+    try {
+      await fetchWithRetry(urls.liffUrl);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`LIFF URL failed: ${reason} (${urls.liffUrl})`);
+    }
   }
 
   await ev.emit({ step: 'verify', status: 'done' });

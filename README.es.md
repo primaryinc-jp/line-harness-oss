@@ -84,6 +84,14 @@ Tarda unos 5 minutos. Al finalizar, el panel en `https://<your-name>-admin.pages
 - **Reservas de calendario** — sistema de booking integrado con Google Calendar vía LIFF
 - **Gestión de staff** — roles Owner / Admin / Staff, claves de API individuales
 
+### Seguimiento de afiliados (ASP)
+- **Emisión self-serve de enlaces** — los afiliados generan sus propios enlaces LIFF de tracking sin intervención del administrador
+- **Gestión de campañas** — comisión fija por campaña, varias campañas en paralelo
+- **Tracking cronológico** — registra clic → alta como contacto → conversión en orden, atribución last-touch
+- **Flujo de aprobación** — aprueba o rechaza las conversiones atribuidas para confirmar la comisión, con marcas de cuentas duplicadas para detectar posible fraude
+- **Notificaciones push por LINE** — push automático al afiliado cuando se confirma la conversión
+- Detalles: [docs/wiki/27-Affiliate-ASP.md](docs/wiki/27-Affiliate-ASP.md)
+
 ### Automatización
 - **Reglas IF-THEN** — 7 tipos de triggers × 6 tipos de acciones
 - **Auto-respuestas** — coincidencia exacta / parcial de palabras clave

@@ -196,11 +196,16 @@ app.post('/start', async (c) => {
         current,
         target,
         manifestUrl: c.env.MANIFEST_URL,
+        // Enables admin-bundle placeholder materialization in the apply
+        // phase — without it the deployed admin calls __LH_WORKER_URL__.
+        workerPublicUrl: c.env.WORKER_PUBLIC_URL,
       },
       d1,
       workerHealthUrl: `${c.env.WORKER_PUBLIC_URL}/api/health`,
       adminUrl: c.env.ADMIN_PUBLIC_URL,
-      liffUrl: c.env.LIFF_PUBLIC_URL,
+      // Empty for worker-assets installs (LIFF_PAGES_PROJECT="") — the
+      // engine skips the LIFF probe in that topology.
+      liffUrl: c.env.LIFF_PAGES_PROJECT ? c.env.LIFF_PUBLIC_URL : '',
       currentWorkerBundleUrl: currentRelease.bundle_url,
     });
   } catch (err) {

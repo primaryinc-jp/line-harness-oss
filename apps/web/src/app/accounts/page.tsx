@@ -14,6 +14,7 @@ import {
 } from '@/components/accounts/account-form-fields'
 import AccountSetupUrls from '@/components/accounts/account-setup-urls'
 import AccountEditModal from '@/components/accounts/account-edit-modal'
+import LinkBaseUrlSetting from '@/components/accounts/link-base-url-setting'
 
 interface LineAccountListItem {
   id: string
@@ -32,6 +33,9 @@ interface LineAccountListItem {
     activeScenarios: number
     messagesThisMonth: number
   }
+  ogSiteName: string | null
+  ogDefaultDescription: string | null
+  ogDefaultImageUrl: string | null
 }
 
 const ccPrompts = [
@@ -103,6 +107,9 @@ export default function AccountsPage() {
         loginChannelId: form.loginChannelId.trim() || null,
         loginChannelSecret: form.loginChannelSecret.trim() || null,
         liffId: form.liffId.trim() || null,
+        ogSiteName: form.ogSiteName?.trim() || null,
+        ogDefaultImageUrl: form.ogDefaultImageUrl?.trim() || null,
+        ogDefaultDescription: form.ogDefaultDescription?.trim() || null,
       })
       if (res.success) {
         setJustCreated({ liffId: form.liffId.trim() || null })
@@ -336,6 +343,10 @@ export default function AccountsPage() {
           ))}
         </div>
       )}
+      <div className="mt-8">
+        <h2 className="text-sm font-semibold text-gray-700 mb-3">グローバル設定</h2>
+        <LinkBaseUrlSetting />
+      </div>
       <CcPromptButton prompts={ccPrompts} />
       {showReorder && (
         <ReorderMode
@@ -356,6 +367,9 @@ export default function AccountsPage() {
           initialChannelId={editing.channelId}
           initialLoginChannelId={editing.loginChannelId}
           initialLiffId={editing.liffId}
+          initialOgSiteName={editing.ogSiteName}
+          initialOgDefaultDescription={editing.ogDefaultDescription}
+          initialOgDefaultImageUrl={editing.ogDefaultImageUrl}
           onClose={() => setEditing(null)}
           onSaved={load}
         />

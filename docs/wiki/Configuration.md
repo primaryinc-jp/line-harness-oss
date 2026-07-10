@@ -108,21 +108,21 @@ npx wrangler d1 create line-crm
 
 ```bash
 # 本番
-npx wrangler d1 execute line-crm --file=packages/db/schema.sql
+npx wrangler d1 execute your-database --file=packages/db/schema.sql
 
 # ローカル開発
 pnpm db:migrate:local
-# = wrangler d1 execute line-crm --file=packages/db/schema.sql --local
+# = wrangler d1 execute your-database --file=packages/db/schema.sql --local
 ```
 
 ### D1 ダッシュボード確認
 
 ```bash
 # テーブル一覧確認
-npx wrangler d1 execute line-crm --command="SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+npx wrangler d1 execute your-database --command="SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
 
 # レコード数確認
-npx wrangler d1 execute line-crm --command="SELECT COUNT(*) FROM friends"
+npx wrangler d1 execute your-database --command="SELECT COUNT(*) FROM friends"
 ```
 
 ### D1 バインディング
@@ -179,20 +179,26 @@ crons = ["0 * * * *"]
 
 ## CORS 設定
 
-MVP では全オリジン許可:
+管理画面は Cookie 認証を使うため、CORS は全許可ではなく管理画面の
+Origin だけを許可します。初回セットアップ / アップデート時に
+`create-line-harness` が次の Worker シークレットを設定します。
 
-```typescript
-// apps/worker/src/index.ts
-app.use('*', cors({ origin: '*' }));
+```bash
+ADMIN_ORIGIN=https://<admin>.pages.dev
+ADMIN_ALLOW_CROSS_SITE=true
 ```
 
-本番環境では管理画面のドメインに制限することを推奨:
+Cloudflare Pages のデプロイ直後に表示される
+`https://<hash>.<admin>.pages.dev` のようなプレビューURLも、同じ Pages
+プロジェクトとして許可されます。まったく別の Pages プロジェクトや別ドメインは
+拒否されます。
 
 ```typescript
 app.use('*', cors({
-  origin: ['https://your-admin.pages.dev', 'https://your-domain.com'],
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Authorization', 'Content-Type'],
+  origin: (origin, c) => resolveCorsOrigin(c.env, origin, c.req.url),
+  credentials: true,
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
 }));
 ```
 

@@ -37,6 +37,7 @@ function serializeFriend(row: DbFriend) {
     isFollowing: Boolean(row.is_following),
     metadata: JSON.parse(row.metadata || '{}'),
     refCode: (row as unknown as Record<string, unknown>).ref_code as string | null,
+    lineAccountId: ((row as unknown as Record<string, unknown>).line_account_id as string | null) ?? null,
     userId: row.user_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -559,25 +560,26 @@ friends.post('/api/friends/:id/messages', async (c) => {
     const { LineClient } = await import('@line-crm/line-sdk');
     // Resolve access token from friend's account (multi-account support)
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
-    if ((friend as unknown as Record<string, unknown>).line_account_id) {
+    const friendAccountId =
+      ((friend as unknown as Record<string, unknown>).line_account_id as string | null) ?? null;
+    if (friendAccountId) {
       const { getLineAccountById } = await import('@line-crm/db');
-      const account = await getLineAccountById(db, (friend as unknown as Record<string, unknown>).line_account_id as string);
+      const account = await getLineAccountById(db, friendAccountId);
       if (account) accessToken = account.channel_access_token;
     }
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
     const sender = await resolveMessageSender(db, c.get('staff'), body);
 
-    // Auto-wrap URLs with tracking links (text with URLs → Flex with button).
-    // Tracking is server-side; callers opt out with trackLinks:false
-    // (upstream trackLinks contract).
+    // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
+    // trackLinks=false で明示的に短縮 OFF (URL をそのまま送る)
     let tracked = { messageType, content: body.content };
     if (body.trackLinks !== false) {
       const { autoTrackContent } = await import('../services/auto-track.js');
       tracked = await autoTrackContent(
         db, messageType, body.content,
         c.env.WORKER_URL || new URL(c.req.url).origin,
-        { lineAccountId: ((friend as unknown as Record<string, unknown>).line_account_id as string | undefined) ?? null },
+        { lineAccountId: friendAccountId },
       );
     }
 
