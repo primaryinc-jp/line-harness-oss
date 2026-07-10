@@ -124,11 +124,14 @@ const execCtx = {
 } as unknown as ExecutionContext;
 
 describe('POST /api/booking/admin/bookings', () => {
+  // 常に「明日の JST 11:00」を使う。固定日付だとその日の 11:00 JST を過ぎた
+  // 時点で past-slot 検証 (422) に落ちるようになり、テストが日付依存で壊れる。
+  const tomorrowUtcDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const validBody = {
     friend_id: 'f1',
     menu_id: 'm1',
     staff_id: 's1',
-    starts_at: '2026-07-10T02:00:00.000Z', // JST 11:00
+    starts_at: `${tomorrowUtcDate}T02:00:00.000Z`, // JST 11:00
   };
 
   function happyDb(insertChanges = 1) {
