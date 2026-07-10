@@ -1,4 +1,4 @@
-import { jstNow } from './utils.js';
+import { jstNow, toJstString } from './utils.js';
 
 /**
  * LINE group/room conversation target (migration 047).
@@ -175,27 +175,56 @@ export async function upsertLineTarget(
   return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
 }
 
+export interface SetLineTargetActiveInput {
+  targetType: 'group' | 'room';
+  lineTargetId: string;
+  isActive: boolean;
+  /** LINE event.timestamp (ms) of the join/leave event. */
+  eventTimestamp: number;
+  lineAccountId?: string | null;
+}
+
 /**
- * Apply a join/leave membership transition. `eventTimestamp` is the LINE
- * event.timestamp (ms): LINE may redeliver webhook events out of order, so
- * the update only applies when it is not older than the last applied
- * transition — a stale join redelivered after a leave must not flip the
- * target back to active (and re-open the 409 send guard).
+ * Apply a join/leave membership transition. LINE may redeliver webhook events
+ * out of order, so the transition only applies when `eventTimestamp` is not
+ * older than the last applied one — a stale join redelivered after a leave
+ * must not flip the target back to active (and re-open the 409 send guard).
+ *
+ * Single atomic INSERT ... ON CONFLICT: a leave for a target that was never
+ * registered (pre-feature groups, concurrent webhooks) writes an inactive
+ * tombstone row with the event timestamp. Without it, a later stale join
+ * would register the target as active and the ordering guard would have
+ * nothing to compare against.
  */
 export async function setLineTargetActive(
   db: D1Database,
-  lineTargetId: string,
-  isActive: boolean,
-  eventTimestamp: number,
+  input: SetLineTargetActiveInput,
 ): Promise<void> {
+  const now = jstNow();
   await db
     .prepare(
-      `UPDATE line_targets
-       SET is_active = ?, membership_updated_at = ?, updated_at = ?
-       WHERE line_target_id = ?
-         AND (membership_updated_at IS NULL OR membership_updated_at <= ?)`,
+      `INSERT INTO line_targets (id, target_type, line_target_id, is_active, line_account_id, membership_updated_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(line_target_id) DO UPDATE SET
+         is_active = CASE
+           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           THEN excluded.is_active ELSE line_targets.is_active END,
+         membership_updated_at = CASE
+           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           THEN excluded.membership_updated_at ELSE line_targets.membership_updated_at END,
+         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         updated_at = excluded.updated_at`,
     )
-    .bind(isActive ? 1 : 0, eventTimestamp, jstNow(), lineTargetId, eventTimestamp)
+    .bind(
+      crypto.randomUUID(),
+      input.targetType,
+      input.lineTargetId,
+      input.isActive ? 1 : 0,
+      input.lineAccountId ?? null,
+      input.eventTimestamp,
+      now,
+      now,
+    )
     .run();
 }
 
@@ -229,6 +258,13 @@ export interface LogTargetMessageInput {
    * Outgoing sends leave this null (no dedupe needed).
    */
   lineMessageId?: string | null;
+  /**
+   * LINE event.timestamp (ms) — when the message actually occurred. Used for
+   * created_at / last_message_at so delayed or redelivered webhooks keep the
+   * real conversation order instead of surfacing as the newest message.
+   * Outgoing sends omit it (send time = occurrence time).
+   */
+  occurredAt?: number | null;
 }
 
 /**
@@ -242,6 +278,7 @@ export async function logTargetMessage(
 ): Promise<string> {
   const id = crypto.randomUUID();
   const now = jstNow();
+  const createdAt = input.occurredAt != null ? toJstString(new Date(input.occurredAt)) : now;
   const result = await db
     .prepare(
       `INSERT OR IGNORE INTO target_messages_log (id, target_id, direction, message_type, content, sender_line_user_id, sender_display_name, source, line_account_id, sender_staff_id, sender_name, sender_icon_url, line_message_id, created_at)
@@ -261,7 +298,7 @@ export async function logTargetMessage(
       input.senderName ?? null,
       input.senderIconUrl ?? null,
       input.lineMessageId ?? null,
-      now,
+      createdAt,
     )
     .run();
 
@@ -273,9 +310,18 @@ export async function logTargetMessage(
     if (existing) return existing.id;
   }
 
+  // last_message_at is monotonic: a delayed/redelivered old message must not
+  // surface the target as having new activity (timestamps share the same JST
+  // ISO format, so string MAX is chronological).
   await db
-    .prepare(`UPDATE line_targets SET last_message_at = ?, updated_at = ? WHERE id = ?`)
-    .bind(now, now, input.targetId)
+    .prepare(
+      `UPDATE line_targets
+       SET last_message_at = CASE
+             WHEN last_message_at IS NULL OR last_message_at < ? THEN ? ELSE last_message_at END,
+           updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(createdAt, createdAt, now, input.targetId)
     .run();
   return id;
 }
@@ -294,13 +340,16 @@ export async function getTargetMessages(
   // julianday() cursor: preserves sub-second precision and sorts ISO 8601
   // cursors in any timezone form correctly against stored +09:00 timestamps
   // (same rationale as GET /api/conversations/:friendId).
+  // `id DESC` tie-breaker: created_at comes from LINE event.timestamp (ms), so
+  // simultaneous messages are possible; ordering must stay deterministic
+  // across pagination requests.
   const sql = before
     ? `SELECT * FROM target_messages_log
        WHERE target_id = ? AND julianday(created_at) < julianday(?)
-       ORDER BY created_at DESC LIMIT ?`
+       ORDER BY created_at DESC, id DESC LIMIT ?`
     : `SELECT * FROM target_messages_log
        WHERE target_id = ?
-       ORDER BY created_at DESC LIMIT ?`;
+       ORDER BY created_at DESC, id DESC LIMIT ?`;
   const binds: (string | number)[] = before ? [targetId, before, limit] : [targetId, limit];
   const result = await db.prepare(sql).bind(...binds).all<TargetMessage>();
   return result.results;

@@ -181,15 +181,62 @@ describe('901_primaryinc_line_targets.sql', () => {
       (db.prepare(`SELECT is_active AS a FROM line_targets WHERE line_target_id = 'Cg1'`).get() as { a: number }).a;
 
     // leave at t=200
-    await setLineTargetActive(d1, 'Cg1', false, 200);
+    await setLineTargetActive(d1, { targetType: 'group', lineTargetId: 'Cg1', isActive: false, eventTimestamp: 200 });
     expect(active()).toBe(0);
     // stale join redelivered out of order (t=100) must NOT reactivate —
     // it would re-open sends to a group the bot already left
-    await setLineTargetActive(d1, 'Cg1', true, 100);
+    await setLineTargetActive(d1, { targetType: 'group', lineTargetId: 'Cg1', isActive: true, eventTimestamp: 100 });
     expect(active()).toBe(0);
     // a genuinely newer join (t=300) does reactivate
-    await setLineTargetActive(d1, 'Cg1', true, 300);
+    await setLineTargetActive(d1, { targetType: 'group', lineTargetId: 'Cg1', isActive: true, eventTimestamp: 300 });
     expect(active()).toBe(1);
+  });
+
+  it('leave for an unregistered target writes a tombstone that blocks a stale join', async () => {
+    const d1 = asD1(db);
+    // leave (t=200) arrives before the target was ever registered — must
+    // persist an inactive tombstone, not be a no-op
+    await setLineTargetActive(d1, { targetType: 'group', lineTargetId: 'Cg1', isActive: false, eventTimestamp: 200 });
+    const row = () =>
+      db.prepare(`SELECT is_active AS a, membership_updated_at AS ts FROM line_targets WHERE line_target_id = 'Cg1'`)
+        .get() as { a: number; ts: number } | undefined;
+    expect(row()).toMatchObject({ a: 0, ts: 200 });
+
+    // stale join redelivered afterwards (t=100): the join path first upserts
+    // (name refresh — must not touch is_active) then applies the guarded
+    // membership transition, which the tombstone timestamp blocks
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', displayName: '田中家' });
+    await setLineTargetActive(d1, { targetType: 'group', lineTargetId: 'Cg1', isActive: true, eventTimestamp: 100 });
+    expect(row()).toMatchObject({ a: 0, ts: 200 });
+    const count = db.prepare(`SELECT COUNT(*) AS c FROM line_targets`).get() as { c: number };
+    expect(count.c).toBe(1);
+  });
+
+  it('logTargetMessage stores occurredAt as created_at and keeps last_message_at monotonic', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    const lastMessageAt = () =>
+      (db.prepare(`SELECT last_message_at AS t FROM line_targets WHERE id = ?`).get(target.id) as { t: string }).t;
+
+    // newer message first (t2), then a delayed older one (t1) arrives late
+    const t1 = Date.UTC(2026, 6, 10, 1, 0, 0); // 10:00 JST
+    const t2 = Date.UTC(2026, 6, 10, 2, 0, 0); // 11:00 JST
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text', content: '新しい方', lineMessageId: 'm2', occurredAt: t2,
+    });
+    const afterNewer = lastMessageAt();
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text', content: '遅延した古い方', lineMessageId: 'm1', occurredAt: t1,
+    });
+
+    // created_at reflects the event time, so ordering is by real occurrence
+    const rows = db
+      .prepare(`SELECT content FROM target_messages_log WHERE target_id = ? ORDER BY created_at DESC, id DESC`)
+      .all(target.id) as Array<{ content: string }>;
+    expect(rows.map((r) => r.content)).toEqual(['新しい方', '遅延した古い方']);
+    // the delayed old message must not surface the target as newly active
+    expect(lastMessageAt()).toBe(afterNewer);
+    expect(afterNewer).toBe('2026-07-10T11:00:00.000+09:00');
   });
 
   it('logTargetMessage dedupes redelivered webhook messages by line_message_id', async () => {

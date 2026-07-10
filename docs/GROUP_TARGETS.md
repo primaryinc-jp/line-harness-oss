@@ -15,12 +15,16 @@ target は次のタイミングで自動登録される（過去グループの�
 `leave` イベントで `isActive=false` になる。join/leave の状態遷移は
 `event.timestamp` でガードされ、順序が入れ替わった webhook 再配信
 （leave 後に届く古い join/message）が退出済み target を再 active 化する
-ことはない。グループ名・アイコンは
+ことはない。未登録 target への leave は inactive の tombstone 行として
+保存され、後から届く stale join の再登録もブロックする。グループ名・アイコンは
 join 時と名前未取得時に LINE の group summary API から best-effort で取得する
 （room には summary API がないため fallback 名になる）。
 
 グループ内の受信メッセージは `target_messages_log` に発言者
 （`senderLineUserId` / `senderDisplayName`）付きで記録される。
+`created_at` には LINE の `event.timestamp`（実発言時刻）を使い、
+target の `lastMessageAt` は単調増加（遅延・再配信された古い発言で
+最新扱いにならない）。同時刻は `id` を tie-breaker に決定的に並ぶ。
 LINE の webhook 再送（redelivery）は LINE message ID
 （`(target_id, line_message_id)` の UNIQUE 制約）で冪等に排除される。
 自動返信・シナリオはグループには適用されない（friend 専用のまま）。
@@ -51,7 +55,9 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 - 送信 body は friend 送信と同じ:
   `{ messageType?, content, altText?, senderMode?, senderStaffId?, trackLinks? }`。
   URL の計測リンク変換はサーバー側で行う（`trackLinks: false` で無効化。
-  呼び出し側でのpre-trackingは不要・非推奨）
+  呼び出し側での pre-tracking は不要・非推奨）。作成される短縮リンクは
+  target の所属アカウント（`line_account_id`）を所有者として持ち、
+  LINE アプリ内クリックはそのアカウントの LIFF 経由で解決される
 - bot が退出済み（`isActive=false`）の target への送信は 409
 - `limit` は 1..200 の整数、`offset` は 0 以上の整数。範囲外・非数値は 400
 

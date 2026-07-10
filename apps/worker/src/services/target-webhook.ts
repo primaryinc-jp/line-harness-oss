@@ -37,8 +37,16 @@ export async function handleTargetEvent(
   if (!lineTargetId) return;
 
   if (event.type === 'leave') {
-    // event.timestamp guards against out-of-order redelivery (see setLineTargetActive)
-    await setLineTargetActive(db, lineTargetId, false, event.timestamp);
+    // event.timestamp guards against out-of-order redelivery; an unregistered
+    // target gets an inactive tombstone row so a later stale join cannot
+    // register it as active (see setLineTargetActive)
+    await setLineTargetActive(db, {
+      targetType,
+      lineTargetId,
+      isActive: false,
+      eventTimestamp: event.timestamp,
+      lineAccountId,
+    });
     console.log(`[target] leave ${targetType}=${lineTargetId}`);
     return;
   }
@@ -72,7 +80,13 @@ export async function handleTargetEvent(
     // Reactivation is timestamp-guarded: a stale join redelivered after a
     // newer leave must not flip a left target back to active. Messages never
     // reactivate (upsertLineTarget does not touch is_active).
-    await setLineTargetActive(db, lineTargetId, true, event.timestamp);
+    await setLineTargetActive(db, {
+      targetType,
+      lineTargetId,
+      isActive: true,
+      eventTimestamp: event.timestamp,
+      lineAccountId,
+    });
     console.log(`[target] join ${targetType}=${lineTargetId} name=${target.display_name ?? 'unknown'}`);
     return;
   }
@@ -146,5 +160,8 @@ export async function handleTargetEvent(
     lineAccountId,
     // LINE redelivers webhook events; the message id dedupes repeat deliveries
     lineMessageId: msg.id,
+    // real occurrence time — delayed/redelivered webhooks must not reorder
+    // the conversation
+    occurredAt: event.timestamp,
   });
 }

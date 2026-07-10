@@ -65,7 +65,9 @@ describe('handleTargetEvent', () => {
       lineAccountId: 'acc-1',
     }));
     // Reactivation goes through the event-timestamp-guarded membership update
-    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, 'Cgroup1', true, 1751000000000);
+    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, {
+      targetType: 'group', lineTargetId: 'Cgroup1', isActive: true, eventTimestamp: 1751000000000, lineAccountId: 'acc-1',
+    });
   });
 
   test('group summary failure is best-effort: target is still registered', async () => {
@@ -105,6 +107,8 @@ describe('handleTargetEvent', () => {
       senderLineUserId: 'U1',
       senderDisplayName: '田中太郎',
       lineMessageId: 'mid-1',
+      // real occurrence time drives created_at / last_message_at
+      occurredAt: 0,
     }));
   });
 
@@ -136,7 +140,9 @@ describe('handleTargetEvent', () => {
       event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
       'token', null,
     );
-    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, 'Cgroup1', false, 1751000000000);
+    expect(dbMocks.setLineTargetActive).toHaveBeenCalledWith(db, {
+      targetType: 'group', lineTargetId: 'Cgroup1', isActive: false, eventTimestamp: 1751000000000, lineAccountId: null,
+    });
     expect(dbMocks.upsertLineTarget).not.toHaveBeenCalled();
   });
 
