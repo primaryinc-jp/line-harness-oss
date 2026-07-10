@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { upsertLineTarget, logTargetMessage } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -20,6 +21,25 @@ function loadDb(): Database.Database {
   );
   db.exec(migration);
   return db;
+}
+
+/**
+ * Minimal D1Database adapter over better-sqlite3, enough to exercise the
+ * targets.ts helpers (prepare/bind/run/first/all) against a real SQLite
+ * schema — the behavior under test (ON CONFLICT upsert, INSERT OR IGNORE
+ * dedupe) lives in the SQL, not in D1 itself.
+ */
+function asD1(db: Database.Database): D1Database {
+  const wrap = (sql: string, binds: unknown[] = []) => ({
+    bind: (...args: unknown[]) => wrap(sql, args),
+    run: async () => {
+      const info = db.prepare(sql).run(...(binds as never[]));
+      return { meta: { changes: info.changes } };
+    },
+    first: async () => db.prepare(sql).get(...(binds as never[])) ?? null,
+    all: async () => ({ results: db.prepare(sql).all(...(binds as never[])) }),
+  });
+  return { prepare: (sql: string) => wrap(sql) } as unknown as D1Database;
 }
 
 describe('047_line_targets.sql', () => {
@@ -122,5 +142,60 @@ describe('047_line_targets.sql', () => {
       .prepare(`SELECT COUNT(*) AS c FROM target_messages_log`)
       .get() as { c: number };
     expect(count.c).toBe(0);
+  });
+
+  it('upsertLineTarget is atomic: concurrent first registrations both succeed with one row', async () => {
+    // Two webhooks for the same unregistered group racing each other: with a
+    // SELECT→INSERT pair the loser would hit the UNIQUE constraint and throw,
+    // dropping its event. The single-statement upsert must let both resolve.
+    const d1 = asD1(db);
+    const [a, b] = await Promise.all([
+      upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', displayName: null }),
+      upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', displayName: '田中家' }),
+    ]);
+    expect(a.id).toBe(b.id);
+    const count = db.prepare(`SELECT COUNT(*) AS c FROM line_targets`).get() as { c: number };
+    expect(count.c).toBe(1);
+  });
+
+  it('upsertLineTarget preserves known name/account on null input and reactivates', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', displayName: '田中家', pictureUrl: 'p.png', lineAccountId: 'acc1',
+    });
+    db.prepare(`UPDATE line_targets SET is_active = 0`).run();
+    const row = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    expect(row.display_name).toBe('田中家');
+    expect(row.picture_url).toBe('p.png');
+    expect(row.line_account_id).toBe('acc1');
+    expect(row.is_active).toBe(1);
+  });
+
+  it('logTargetMessage dedupes redelivered webhook messages by line_message_id', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    const input = {
+      targetId: target.id,
+      direction: 'incoming' as const,
+      messageType: 'text',
+      content: 'hello',
+      lineMessageId: 'lm-1',
+    };
+    const first = await logTargetMessage(d1, input);
+    const second = await logTargetMessage(d1, input);
+    expect(second).toBe(first);
+    const count = db.prepare(`SELECT COUNT(*) AS c FROM target_messages_log`).get() as { c: number };
+    expect(count.c).toBe(1);
+  });
+
+  it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    const base = { targetId: target.id, direction: 'outgoing' as const, messageType: 'text', content: 'hi' };
+    const a = await logTargetMessage(d1, base);
+    const b = await logTargetMessage(d1, base);
+    expect(a).not.toBe(b);
+    const count = db.prepare(`SELECT COUNT(*) AS c FROM target_messages_log`).get() as { c: number };
+    expect(count.c).toBe(2);
   });
 });

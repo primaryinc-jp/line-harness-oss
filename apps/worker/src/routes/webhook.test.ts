@@ -255,6 +255,8 @@ describe('POST /webhook — group/room target events', () => {
       content: '内見できますか',
       senderLineUserId: 'U1',
       senderDisplayName: '田中太郎',
+      // dedupe key for LINE webhook redelivery
+      lineMessageId: 'mid-1',
     }));
     // Group messages must never fall through to the 1:1 friend path
     expect(getFriendByLineUserId).not.toHaveBeenCalled();

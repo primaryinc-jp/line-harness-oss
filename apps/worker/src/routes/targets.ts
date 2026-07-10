@@ -9,7 +9,7 @@ import {
   logTargetMessage,
 } from '@line-crm/db';
 import type { LineTarget, TargetMessage } from '@line-crm/db';
-import { buildMessage } from '../services/step-delivery.js';
+import { buildMessage, messageToLogPayload } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
 import { MessageSenderError, resolveMessageSender, type SenderSelection } from '../utils/message-sender.js';
 
@@ -32,6 +32,19 @@ type TargetType = (typeof TARGET_TYPES)[number];
 
 function isTargetType(v: string): v is TargetType {
   return (TARGET_TYPES as readonly string[]).includes(v);
+}
+
+/**
+ * Parse an integer query param bounded to [min, max]. Returns null on
+ * non-integer or out-of-range input so callers can 400 — an unchecked value
+ * reaches the SQL LIMIT/OFFSET binds directly (negative LIMIT means
+ * "unbounded" in SQLite; NaN is a D1 binding error).
+ */
+function intParam(raw: string | undefined, fallback: number, min: number, max: number): number | null {
+  if (raw === undefined || raw === '') return fallback;
+  if (!/^-?\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= min && n <= max ? n : null;
 }
 
 function fallbackDisplayName(row: LineTarget): string {
@@ -89,8 +102,11 @@ targets.get('/api/targets', async (c) => {
     if (typeParam && !isTargetType(typeParam)) {
       return c.json({ success: false, error: `unsupported target type: ${typeParam}` }, 400);
     }
-    const limit = Math.min(Number(c.req.query('limit') ?? '50'), 200);
-    const offset = Number(c.req.query('offset') ?? '0');
+    const limit = intParam(c.req.query('limit'), 50, 1, 200);
+    const offset = intParam(c.req.query('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
+    if (limit === null || offset === null) {
+      return c.json({ success: false, error: 'limit must be an integer 1..200 and offset a non-negative integer' }, 400);
+    }
 
     // Metadata filters: ?metadata.key=value (same contract as GET /api/friends).
     // Lets integrations reverse-look-up "all targets linked to this
@@ -199,7 +215,10 @@ targets.get('/api/conversations/:targetType/:targetId', async (c) => {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
 
-    const limit = Math.min(Number(c.req.query('limit') ?? '50'), 200);
+    const limit = intParam(c.req.query('limit'), 50, 1, 200);
+    if (limit === null) {
+      return c.json({ success: false, error: 'limit must be an integer 1..200' }, 400);
+    }
     const before = c.req.query('before') ?? null;
     const messages = await getTargetMessages(db, target.id, { limit, before });
 
@@ -263,11 +282,14 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     const message = buildMessage(tracked.messageType, tracked.content, body.altText);
     await lineClient.pushMessage(target.line_target_id, [message], sender.lineSender);
 
+    // Log what was actually pushed (post-tracking, post-buildMessage) — e.g.
+    // a broken image/flex payload falls back to text and must be logged as text
+    const logPayload = messageToLogPayload(message);
     const messageId = await logTargetMessage(db, {
       targetId: target.id,
       direction: 'outgoing',
-      messageType,
-      content: body.content,
+      messageType: logPayload.messageType,
+      content: logPayload.content,
       source: 'manual',
       lineAccountId: target.line_account_id,
       senderStaffId: sender.staffId,

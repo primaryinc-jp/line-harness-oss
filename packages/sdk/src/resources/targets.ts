@@ -17,12 +17,19 @@ import type {
  * `targetId` accepts either the harness row id or the raw LINE groupId/roomId.
  */
 export class TargetsResource {
-  constructor(private readonly http: HttpClient) {}
+  constructor(
+    private readonly http: HttpClient,
+    private readonly defaultAccountId?: string,
+  ) {}
 
   async list(params?: TargetListParams): Promise<TargetListResponse> {
     const query = new URLSearchParams()
     if (params?.type) query.set('type', params.type)
-    if (params?.lineAccountId) query.set('lineAccountId', params.lineAccountId)
+    // Same default scoping as friends/conversations: LINE_HARNESS_ACCOUNT_ID
+    // (config.lineAccountId) must narrow target lists too, or a scoped MCP
+    // would list/reverse-look-up targets across every account.
+    const accountId = params?.lineAccountId ?? this.defaultAccountId
+    if (accountId) query.set('lineAccountId', accountId)
     if (params?.includeInactive) query.set('includeInactive', 'true')
     for (const [key, value] of Object.entries(params?.metadata ?? {})) {
       query.set(`metadata.${key}`, value)

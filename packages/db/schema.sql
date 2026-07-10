@@ -875,8 +875,12 @@ CREATE TABLE IF NOT EXISTS target_messages_log (
   sender_staff_id      TEXT,
   sender_name          TEXT,
   sender_icon_url      TEXT,
+  line_message_id      TEXT,
   created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_target_messages_log_target_id ON target_messages_log (target_id);
 CREATE INDEX IF NOT EXISTS idx_target_messages_log_created_at ON target_messages_log (created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_target_messages_log_line_message_id
+  ON target_messages_log (target_id, line_message_id)
+  WHERE line_message_id IS NOT NULL;

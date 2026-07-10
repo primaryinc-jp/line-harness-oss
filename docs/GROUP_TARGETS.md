@@ -18,6 +18,8 @@ join 時と名前未取得時に LINE の group summary API から best-effort �
 
 グループ内の受信メッセージは `target_messages_log` に発言者
 （`senderLineUserId` / `senderDisplayName`）付きで記録される。
+LINE の webhook 再送（redelivery）は LINE message ID
+（`(target_id, line_message_id)` の UNIQUE 制約）で冪等に排除される。
 自動返信・シナリオはグループには適用されない（friend 専用のまま）。
 
 ## API
@@ -46,6 +48,7 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 - 送信 body は friend 送信と同じ:
   `{ messageType?, content, altText?, senderMode?, senderStaffId? }`
 - bot が退出済み（`isActive=false`）の target への送信は 409
+- `limit` は 1..200 の整数、`offset` は 0 以上の整数。範囲外・非数値は 400
 
 対応可否は `GET /api/capabilities` の `features` に `targets` /
 `group_conversations` が含まれるかで判定できる。

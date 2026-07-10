@@ -780,6 +780,8 @@ async function handleTargetEvent(
     senderDisplayName,
     source: 'user',
     lineAccountId,
+    // LINE redelivers webhook events; the message id dedupes repeat deliveries
+    lineMessageId: msg.id,
   });
 }
 

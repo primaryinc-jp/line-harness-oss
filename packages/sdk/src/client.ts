@@ -63,7 +63,7 @@ export class LineHarness {
     this.images = new ImagesResource(http)
     this.autoReplies = new AutoRepliesResource(http, this.defaultAccountId)
     this.conversations = new ConversationsResource(http, this.defaultAccountId)
-    this.targets = new TargetsResource(http)
+    this.targets = new TargetsResource(http, this.defaultAccountId)
     this.workflows = new Workflows(this.friends, this.scenarios, this.broadcasts)
 
     this.createStepScenario = this.workflows.createStepScenario.bind(this.workflows)

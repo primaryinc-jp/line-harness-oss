@@ -27,6 +27,11 @@ vi.mock('../services/step-delivery.js', () => ({
   buildMessage: vi.fn((type: string, content: string) =>
     type === 'text' ? { type: 'text', text: content } : { type, content },
   ),
+  messageToLogPayload: vi.fn((m: { type: string; text?: string; content?: string }) =>
+    m.type === 'text'
+      ? { messageType: 'text', content: m.text }
+      : { messageType: m.type, content: m.content },
+  ),
 }));
 
 vi.mock('../services/auto-track.js', () => ({
@@ -121,6 +126,17 @@ describe('GET /api/targets', () => {
     const app = setupApp();
     const res = await app.request('/api/targets?type=friend');
     expect(res.status).toBe(400);
+  });
+
+  test('rejects out-of-range or non-numeric pagination with 400', async () => {
+    const app = setupApp();
+    // negative LIMIT means "unbounded" in SQLite, NaN is a D1 binding error —
+    // neither may reach the DB layer
+    for (const qs of ['limit=-1', 'limit=0', 'limit=201', 'limit=abc', 'offset=-5', 'offset=x']) {
+      const res = await app.request(`/api/targets?${qs}`);
+      expect(res.status, qs).toBe(400);
+      expect(dbMocks.listLineTargets).not.toHaveBeenCalled();
+    }
   });
 
   test('serves a fallback display name when the group name is unknown', async () => {
@@ -236,6 +252,14 @@ describe('GET /api/conversations/:targetType/:targetId', () => {
     expect(body.data.messages.map((m) => m.id)).toEqual(['m1', 'm2']);
     expect(body.data.messages[1].senderDisplayName).toBe('田中太郎');
   });
+
+  test('rejects invalid limit with 400 before hitting the DB', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=-1');
+    expect(res.status).toBe(400);
+    expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/targets/:targetType/:targetId/messages', () => {
@@ -265,6 +289,28 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
       content: '図面をお送りします',
       source: 'manual',
       lineAccountId: 'acc-1',
+    }));
+  });
+
+  test('logs the actually-pushed message, not the request body (text fallback case)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    // Simulate buildMessage's broken-image fallback: the request said image,
+    // but a text message was actually pushed to LINE
+    const { buildMessage } = await import('../services/step-delivery.js');
+    vi.mocked(buildMessage).mockReturnValueOnce({ type: 'text', text: 'not-json' });
+
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageType: 'image', content: 'not-json', senderMode: 'official' }),
+    });
+    expect(res.status).toBe(200);
+    expect(dbMocks.logTargetMessage).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      messageType: 'text',
+      content: 'not-json',
     }));
   });
 

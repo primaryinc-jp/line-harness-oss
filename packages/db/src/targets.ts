@@ -37,6 +37,7 @@ export interface TargetMessage {
   sender_staff_id: string | null;
   sender_name: string | null;
   sender_icon_url: string | null;
+  line_message_id: string | null;
   created_at: string;
 }
 
@@ -129,44 +130,29 @@ export interface UpsertLineTargetInput {
  * Insert or reactivate a group/room target. Existing display_name/picture_url
  * are only overwritten when the input provides a non-null value (group summary
  * fetches are best-effort and must not blank out a previously known name).
+ *
+ * Single atomic statement: concurrent webhooks for the same unregistered
+ * target must not race a SELECT→INSERT pair — the loser's INSERT would hit
+ * the line_target_id UNIQUE constraint and drop its event.
  */
 export async function upsertLineTarget(
   db: D1Database,
   input: UpsertLineTargetInput,
 ): Promise<LineTarget> {
   const now = jstNow();
-  const existing = await getLineTargetByLineTargetId(db, input.lineTargetId);
-
-  if (existing) {
-    await db
-      .prepare(
-        `UPDATE line_targets
-         SET display_name = ?,
-             picture_url = ?,
-             line_account_id = ?,
-             is_active = 1,
-             updated_at = ?
-         WHERE line_target_id = ?`,
-      )
-      .bind(
-        input.displayName ?? existing.display_name,
-        input.pictureUrl ?? existing.picture_url,
-        input.lineAccountId ?? existing.line_account_id,
-        now,
-        input.lineTargetId,
-      )
-      .run();
-    return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
-  }
-
-  const id = crypto.randomUUID();
   await db
     .prepare(
       `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT(line_target_id) DO UPDATE SET
+         display_name = COALESCE(excluded.display_name, line_targets.display_name),
+         picture_url = COALESCE(excluded.picture_url, line_targets.picture_url),
+         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         is_active = 1,
+         updated_at = excluded.updated_at`,
     )
     .bind(
-      id,
+      crypto.randomUUID(),
       input.targetType,
       input.lineTargetId,
       input.displayName ?? null,
@@ -177,7 +163,7 @@ export async function upsertLineTarget(
     )
     .run();
 
-  return (await getLineTargetById(db, id))!;
+  return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
 }
 
 /** Mark a target inactive (bot left / was removed from the group). */
@@ -215,19 +201,30 @@ export interface LogTargetMessageInput {
   senderStaffId?: string | null;
   senderName?: string | null;
   senderIconUrl?: string | null;
+  /**
+   * LINE message id of an incoming webhook message. Dedupe key: LINE redelivers
+   * webhook events (same message id, deliveryContext.isRedelivery=true), and a
+   * UNIQUE index on (target_id, line_message_id) makes the insert idempotent.
+   * Outgoing sends leave this null (no dedupe needed).
+   */
+  lineMessageId?: string | null;
 }
 
-/** Insert a target message row and bump the target's last_message_at. */
+/**
+ * Insert a target message row and bump the target's last_message_at.
+ * Idempotent for incoming messages: a duplicate (target_id, line_message_id)
+ * is ignored and the already-stored row's id is returned.
+ */
 export async function logTargetMessage(
   db: D1Database,
   input: LogTargetMessageInput,
 ): Promise<string> {
   const id = crypto.randomUUID();
   const now = jstNow();
-  await db
+  const result = await db
     .prepare(
-      `INSERT INTO target_messages_log (id, target_id, direction, message_type, content, sender_line_user_id, sender_display_name, source, line_account_id, sender_staff_id, sender_name, sender_icon_url, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO target_messages_log (id, target_id, direction, message_type, content, sender_line_user_id, sender_display_name, source, line_account_id, sender_staff_id, sender_name, sender_icon_url, line_message_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -242,9 +239,19 @@ export async function logTargetMessage(
       input.senderStaffId ?? null,
       input.senderName ?? null,
       input.senderIconUrl ?? null,
+      input.lineMessageId ?? null,
       now,
     )
     .run();
+
+  if (result.meta.changes === 0 && input.lineMessageId) {
+    const existing = await db
+      .prepare(`SELECT id FROM target_messages_log WHERE target_id = ? AND line_message_id = ?`)
+      .bind(input.targetId, input.lineMessageId)
+      .first<{ id: string }>();
+    if (existing) return existing.id;
+  }
+
   await db
     .prepare(`UPDATE line_targets SET last_message_at = ?, updated_at = ? WHERE id = ?`)
     .bind(now, now, input.targetId)
