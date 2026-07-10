@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { useAccount } from '@/contexts/account-context'
 import type { AccountWithStats } from '@/contexts/account-context'
 import { countryFlag } from '@/lib/country-flag'
+import { UNANSWERED_REFRESH_EVENT } from '@/lib/events'
 
 const appVersion = process.env.APP_VERSION || '0.0.0'
 const appCommitSha = process.env.APP_COMMIT_SHA || 'local'
@@ -38,6 +39,7 @@ const menuSections = [
     label: '分析',
     items: [
       { href: '/inflow-links', label: 'リファラルリンク', icon: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1' },
+      { href: '/affiliates', label: 'アフィリエイト', icon: 'M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 12.632a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z' },
       { href: '/conversions', label: 'CV計測', icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
       { href: '/scoring', label: 'スコアリング', icon: 'M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z' },
       { href: '/form-submissions', label: 'フォーム回答', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
@@ -206,23 +208,33 @@ export default function Sidebar() {
   }, [])
 
   // 未対応件数 polling — メニュー項目にバッジを出す。5 分間隔。
+  // (裏の countUnanswered は messages_log 全走査を含む重い集計なので間隔は詰めない。)
+  // チャット画面での status 変更・手動返信直後は UNANSWERED_REFRESH_EVENT で
+  // 即時再取得する (ポーリング待ちだと操作してもバッジが減らないと感じるため)。
   const [unansweredCount, setUnansweredCount] = useState<number>(0)
   useEffect(() => {
     let cancelled = false
+    // 連続操作で fetch が並走した際、遅い古いレスポンスが新しい値を上書きしない
+    // ように発行順 seq でガードする。
+    let seq = 0
     const fetchCount = async () => {
+      const mySeq = ++seq
       try {
         const { api } = await import('@/lib/api')
         const res = await api.inbox.unanswered.count()
-        if (!cancelled && res.success) setUnansweredCount(res.data.total)
+        if (!cancelled && mySeq === seq && res.success) setUnansweredCount(res.data.total)
       } catch {
         // サイレント失敗
       }
     }
     fetchCount()
     const id = setInterval(fetchCount, 5 * 60_000)
+    const onRefresh = () => { void fetchCount() }
+    window.addEventListener(UNANSWERED_REFRESH_EVENT, onRefresh)
     return () => {
       cancelled = true
       clearInterval(id)
+      window.removeEventListener(UNANSWERED_REFRESH_EVENT, onRefresh)
     }
   }, [])
 

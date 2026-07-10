@@ -94,17 +94,39 @@ jobs:
         # silently shipping a stale dist.
         run: pnpm --filter liff build
 
-      - name: Build Worker (first pass — produces dist for hashing)
-        run: pnpm --filter worker build
+      - name: Write CI wrangler config for artifact builds
+        # The repo's wrangler.toml ships placeholder account/database ids for
+        # OSS consumers. Artifact builds only need the entrypoint + compat
+        # settings; bindings/assets do not change the built script bytes.
+        run: |
+          cat > apps/worker/wrangler.ci.toml <<'TOML'
+          name = "line-harness"
+          main = "src/index.ts"
+          compatibility_date = "2024-12-01"
+          compatibility_flags = ["nodejs_compat"]
+          TOML
+
+      - name: Build Worker artifact (first pass — for identity hashing)
+        # `wrangler deploy --dry-run --outdir` emits EXACTLY the single-file
+        # module wrangler would upload — the same build path every real
+        # deployment uses (GH Actions deploy + create-line-harness). The
+        # vite build is NOT usable here: it splits the worker into
+        # index.js + assets/*.js chunks, and a bundle that ships only
+        # index.js deploys a broken re-export stub.
+        run: |
+          pnpm --filter worker exec wrangler deploy --dry-run \
+            --config wrangler.ci.toml --outdir dist-release
 
       - name: Compute hashes + inject _version.ts
         id: hashes
         run: |
-          # Worker bundle path produced by @cloudflare/vite-plugin —
-          # the plugin emits under dist/<wrangler-name-with-underscores>/.
+          # Hash the wrangler-built single-file artifact. This value is
+          # baked into _version.ts as the Worker's self-reported identity
+          # (worker_hash); the final artifact's byte hash is computed
+          # separately as worker_bundle_hash after the rebuild.
           json=$(pnpm tsx apps/worker/scripts/inject-version.ts \
             --version "${{ steps.version.outputs.version }}" \
-            --worker apps/worker/dist/line_harness/index.js \
+            --worker apps/worker/dist-release/index.js \
             --admin apps/web/out \
             --liff apps/liff/dist \
             --out apps/worker/src/_version.ts)
@@ -124,14 +146,26 @@ jobs:
           echo "liff_hash=${liff_hash}" >> "$GITHUB_OUTPUT"
           echo "released_at=${released_at}" >> "$GITHUB_OUTPUT"
 
-      - name: Rebuild Worker (with embedded _version.ts)
-        run: pnpm --filter worker build
+      - name: Rebuild Worker artifact (with embedded _version.ts)
+        run: |
+          rm -rf apps/worker/dist-release
+          pnpm --filter worker exec wrangler deploy --dry-run \
+            --config wrangler.ci.toml --outdir dist-release
+
+      - name: Compute worker_bundle_hash (detached hash of the final artifact)
+        # The artifact embeds its own identity hash, so its byte hash can
+        # never equal worker_hash — download verification needs this
+        # detached value instead.
+        id: bundlehash
+        run: |
+          worker_bundle_hash=$(node -e "const{createHash}=require('node:crypto');const{readFileSync}=require('node:fs');console.log('sha256:'+createHash('sha256').update(readFileSync('apps/worker/dist-release/index.js')).digest('hex'))")
+          echo "worker_bundle_hash=${worker_bundle_hash}" >> "$GITHUB_OUTPUT"
 
       - name: Build release bundle
         run: |
           mkdir -p dist
           pnpm tsx scripts/release/build-bundle.ts \
-            --worker-js apps/worker/dist/line_harness/index.js \
+            --worker-js apps/worker/dist-release/index.js \
             --admin apps/web/out \
             --liff apps/liff/dist \
             --migrations packages/db/migrations \
@@ -171,6 +205,7 @@ jobs:
             "version": "${{ steps.version.outputs.version }}",
             "released_at": "${{ steps.hashes.outputs.released_at }}",
             "worker_hash": "${{ steps.hashes.outputs.worker_hash }}",
+            "worker_bundle_hash": "${{ steps.bundlehash.outputs.worker_bundle_hash }}",
             "admin_hash": "${{ steps.hashes.outputs.admin_hash }}",
             "liff_hash": "${{ steps.hashes.outputs.liff_hash }}",
             "bundle_url": "${bundle_url}",

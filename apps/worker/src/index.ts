@@ -8,6 +8,9 @@ import {
   getRandomPoolAccount,
   getPoolAccounts,
   getEntryRouteByRefCode,
+  getLineAccountById,
+  getAffiliateLinkByRefCode,
+  incrementAffiliateLinkClick,
 } from '@line-crm/db';
 import { processStepDeliveries } from './services/step-delivery.js';
 import { processScheduledBroadcasts, processQueuedBroadcasts } from './services/broadcast.js';
@@ -33,11 +36,13 @@ import { users } from './routes/users.js';
 import { lineAccounts } from './routes/line-accounts.js';
 import { conversions } from './routes/conversions.js';
 import { affiliates } from './routes/affiliates.js';
+import { affiliateOffers } from './routes/affiliate-offers.js';
 import { duplicates } from './routes/duplicates.js';
 import { usersGrouped } from './routes/users-grouped.js';
 import { inbox } from './routes/inbox.js';
 import { openapi } from './routes/openapi.js';
 import { liffRoutes } from './routes/liff.js';
+import { affiliateSelfRoutes } from './routes/affiliate-self.js';
 // Round 3 ルート
 import { webhooks } from './routes/webhooks.js';
 import { calendar } from './routes/calendar.js';
@@ -46,6 +51,7 @@ import { scoring } from './routes/scoring.js';
 import { templates } from './routes/templates.js';
 import { chats } from './routes/chats.js';
 import { conversations } from './routes/conversations.js';
+import { targets } from './routes/targets.js';
 // notifications ルート (notification_rules CRUD + notifications 一覧) は
 // インボックス機能 (/api/inbox/unanswered) に置き換えたため削除。
 // DB テーブル notification_rules / notifications は archive 目的で残してある。
@@ -75,6 +81,13 @@ import { profileRefresh } from './routes/profile-refresh.js';
 import { richMenuGroups } from './routes/rich-menu-groups.js';
 import adminVersion from './routes/admin-version.js';
 import adminUpdate from './routes/admin-update.js';
+import { isLinkPreviewBot } from './lib/og-bot.js';
+import { buildOgHtml } from './lib/og-html.js';
+import {
+  resolveOgForEvent,
+  resolveOgForForm,
+  resolveOgForAccount,
+} from './lib/og-resolver.js';
 
 export type Env = {
   Bindings: {
@@ -129,7 +142,7 @@ app.use('*', cors({
   origin: (origin, c) => resolveCorsOrigin(c.env, origin, c.req.url),
   credentials: true,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'x-admin-api-key'],
   maxAge: 600,
 }));
 
@@ -149,11 +162,13 @@ app.route('/', users);
 app.route('/', lineAccounts);
 app.route('/', conversions);
 app.route('/', affiliates);
+app.route('/', affiliateOffers);
 app.route('/', duplicates);
 app.route('/', usersGrouped);
 app.route('/', inbox);
 app.route('/', openapi);
 app.route('/', liffRoutes);
+app.route('/', affiliateSelfRoutes);
 
 // Mount route groups — Round 3
 app.route('/', webhooks);
@@ -163,6 +178,7 @@ app.route('/', scoring);
 app.route('/', templates);
 app.route('/', chats);
 app.route('/', conversations);
+app.route('/', targets);
 app.route('/', stripe);
 app.route('/', health);
 app.route('/', automations);
@@ -245,8 +261,33 @@ app.get('/r/:ref', async (c) => {
     if (candidate?.is_active) pool = candidate;
   }
 
-  // 2 / 3. fallback to URL query or 'main'
-  if (!pool) {
+  // 1b. affiliate_links fallback (ASP). Only when the ref is NOT a known
+  // entry_route: entry_routes owns the ref namespace, so an existing route
+  // (even one whose pool is paused) keeps its behavior unchanged. An affiliate
+  // ref resolves its LINE account directly (no pool) and lands on that
+  // account's LIFF. is_active=0 links still redirect (spec §8) — pausing an
+  // affiliate link only stops NEW attribution, never breaks existing links.
+  // The click is counted here (the landing page hit), and `ref` still rides
+  // through to LIFF state below so the existing ref_tracking flow attributes
+  // the eventual friend-add via /auth/callback + /api/liff/link.
+  let affiliateResolved = false;
+  if (!route) {
+    const affiliateLink = await getAffiliateLinkByRefCode(c.env.DB, ref);
+    if (affiliateLink) {
+      await incrementAffiliateLinkClick(c.env.DB, ref);
+      affiliateResolved = true;
+      if (affiliateLink.line_account_id) {
+        const account = await getLineAccountById(c.env.DB, affiliateLink.line_account_id);
+        if (account?.liff_id) liffUrl = `https://liff.line.me/${account.liff_id}`;
+      }
+      // line_account_id === null → keep the default LIFF_URL (既定アカウント).
+    }
+  }
+
+  // 2 / 3. fallback to URL query or 'main'. Skipped for affiliate refs, whose
+  // account is already resolved above; falling through to the 'main' pool would
+  // override the affiliate's chosen account.
+  if (!pool && !affiliateResolved) {
     const poolSlug = c.req.query('pool') || 'main';
     pool = await getTrafficPoolBySlug(c.env.DB, poolSlug);
   }
@@ -275,6 +316,21 @@ app.get('/r/:ref', async (c) => {
   if (xh) liffParams.set('xh', xh);
   const ig = c.req.query('ig');
   if (ig) liffParams.set('ig', ig);
+  const iga = c.req.query('iga');
+  if (iga) liffParams.set('iga', iga);
+  const igan = c.req.query('igan');
+  if (igan) liffParams.set('igan', igan);
+  // LIFF in-app navigation passthrough — OpenChat strips raw liff.line.me
+  // URLs, so we accept `page` / `id` here and forward them to the resolved
+  // LIFF target. Limited to pages whose client initializer enforces the
+  // friend-add gate (initSalonBooking, initEventBooking); page=book/form
+  // would bypass that gate and bypass ref-based attribution, so they are
+  // intentionally excluded until those initializers are unified.
+  const PAGE_PASSTHROUGH_ALLOWED = new Set(['salon-book', 'event', 'event-me']);
+  const page = c.req.query('page');
+  if (page && PAGE_PASSTHROUGH_ALLOWED.has(page)) liffParams.set('page', page);
+  const id = c.req.query('id');
+  if (id) liffParams.set('id', id);
   const liffTarget = liffParams.toString() ? `${liffUrl}?${liffParams.toString()}` : liffUrl;
 
   // Help link carries the *resolved* liff target as `t=` so the help page
@@ -536,22 +592,245 @@ ${longPressBlock}
 </html>`);
 });
 
+// /o — `/r/:ref` の ref 解決・追跡を一切行わない明示 liffId 版の open page。
+// admin UI が OpenChat / IG DM 等で `liff.line.me` を弾かれるチャネル向けに
+// 配布するラップ URL のためのルート。`/r/main` を使うと (a) traffic_pool の
+// ランダム pool account に再解決されて選択中アカウントから外れる、
+// (b) `ref=main` として ref_tracking / friends.ref_code に書き込まれて
+// attribution を汚染する、という 2 つの問題があるため別ルートに分けている。
+// 仕様:
+// - クエリ: liffId (必須, `<digits>-<id>` 形式) / page / id
+// - page は `/r/:ref` と同じ allowlist (salon-book / event / event-me)
+// - mobile UA は「LINEで開く」ボタン、desktop は QR を返す (`/r/:ref` 同等)
+app.get('/o', async (c) => {
+  if (isLinkPreviewBot(c.req.header('user-agent') || '')) {
+    return c.html(await buildOgForLiffPath(c.env.DB, new URL(c.req.url)));
+  }
+
+  const liffId = c.req.query('liffId') || '';
+  if (!/^[0-9]+-[A-Za-z0-9]+$/.test(liffId)) {
+    return c.text('Invalid liffId', 400);
+  }
+
+  const liffParams = new URLSearchParams();
+  liffParams.set('liffId', liffId);
+  const PAGE_PASSTHROUGH_ALLOWED = new Set(['salon-book', 'event', 'event-me']);
+  const page = c.req.query('page');
+  if (page && PAGE_PASSTHROUGH_ALLOWED.has(page)) liffParams.set('page', page);
+  const id = c.req.query('id');
+  if (id) liffParams.set('id', id);
+  const liffTarget = `https://liff.line.me/${liffId}?${liffParams.toString()}`;
+
+  const ua = (c.req.header('user-agent') || '').toLowerCase();
+  const isMobile = /iphone|ipad|android|mobile/.test(ua);
+  const isIOS = /iphone|ipad|ipod/.test(ua);
+  const isAndroid = /android/.test(ua);
+
+  if (isMobile) {
+    const liffPath = liffTarget.replace(/^https:\/\//, '');
+    const intentFallback = encodeURIComponent(liffTarget);
+    const androidIntent = `intent://${liffPath}#Intent;scheme=https;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;package=jp.naver.line.android;S.browser_fallback_url=${intentFallback};end`;
+    const buttonHref = isAndroid ? androidIntent : liffTarget;
+    const longPressHint = isIOS
+      ? '<p class="hint">※開かない場合はボタンを<strong>長押し</strong>して「LINEで開く」を選択</p>'
+      : '';
+    return c.html(`<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LINE で開く</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Hiragino Sans','Helvetica Neue',system-ui,sans-serif;background:#f5f7f5;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.card{background:#fff;border-radius:20px;box-shadow:0 2px 20px rgba(0,0,0,0.06);text-align:center;max-width:360px;width:90%;padding:40px 28px 32px;border:1px solid rgba(0,0,0,0.04)}
+.line-icon{width:48px;height:48px;margin:0 auto 20px}
+.line-icon svg{width:48px;height:48px}
+.msg{font-size:15px;color:#444;font-weight:500;margin-bottom:28px;line-height:1.6}
+.btn{display:block;width:100%;padding:16px;border:none;border-radius:12px;font-size:16px;font-weight:700;text-decoration:none;text-align:center;color:#fff;background:#06C755;box-shadow:0 2px 12px rgba(6,199,85,0.2);transition:all .15s}
+.btn:active{transform:scale(0.98);opacity:.9}
+.hint{font-size:11px;color:#888;margin-top:10px;line-height:1.6}
+.hint strong{color:#06C755;font-weight:700}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="line-icon">
+<svg viewBox="0 0 48 48" fill="none"><rect width="48" height="48" rx="12" fill="#06C755"/><path d="M24 12C17.37 12 12 16.58 12 22.2c0 3.54 2.35 6.65 5.86 8.47-.2.74-.76 2.75-.87 3.17-.14.55.2.54.42.39.18-.12 2.84-1.88 4-2.65.84.13 1.7.22 2.59.22 6.63 0 12-4.58 12-10.2S30.63 12 24 12z" fill="#fff"/></svg>
+</div>
+<p class="msg">LINE で開く</p>
+<a href="${buttonHref}" class="btn">LINEで開く</a>
+${longPressHint}
+</div>
+</body>
+</html>`);
+  }
+
+  return c.html(`<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LINE で開く</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Hiragino Sans','Helvetica Neue',system-ui,sans-serif;background:#f5f7f5;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.card{background:#fff;border-radius:20px;box-shadow:0 2px 20px rgba(0,0,0,0.06);text-align:center;max-width:480px;width:90%;padding:48px;border:1px solid rgba(0,0,0,0.04)}
+.line-icon{width:48px;height:48px;margin:0 auto 20px}
+.line-icon svg{width:48px;height:48px}
+.msg{font-size:15px;color:#444;font-weight:500;margin-bottom:32px;line-height:1.6}
+.qr{background:#f9f9f9;border-radius:16px;padding:24px;display:inline-block;margin-bottom:24px;border:1px solid rgba(0,0,0,0.04)}
+.qr img{display:block;width:240px;height:240px}
+.hint{font-size:13px;color:#999;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="line-icon">
+<svg viewBox="0 0 48 48" fill="none"><rect width="48" height="48" rx="12" fill="#06C755"/><path d="M24 12C17.37 12 12 16.58 12 22.2c0 3.54 2.35 6.65 5.86 8.47-.2.74-.76 2.75-.87 3.17-.14.55.2.54.42.39.18-.12 2.84-1.88 4-2.65.84.13 1.7.22 2.59.22 6.63 0 12-4.58 12-10.2S30.63 12 24 12z" fill="#fff"/></svg>
+</div>
+<p class="msg">スマートフォンで QR コードを読み取ってください</p>
+<div class="qr">
+<img src="/api/qr?size=240x240&data=${encodeURIComponent(liffTarget)}" alt="QR Code">
+</div>
+<p class="hint">LINE アプリのカメラまたは<br>スマートフォンのカメラで読み取れます</p>
+</div>
+</body>
+</html>`);
+});
+
 // Convenience redirect for /book path
 app.get('/book', (c) => c.redirect('/?page=book'));
 
+// URL（パス or クエリ）からイベント/フォーム等のレコードを引いて OGP HTML を組み立てる。
+// LIFF アプリの共有 URL は実際には `https://liff.line.me/<LIFF_ID>/?page=event&id=<id>`
+// 形式で、Worker に届くときは pathname が `/`、クエリに `page` `id` `liffId` が乗る。
+// 旧形式の `/events/:id` パスも残しているのでパスマッチも合わせて見る。
+async function buildOgForLiffPath(db: D1Database, url: URL): Promise<string> {
+  const pathname = url.pathname;
+  const liffIdFromQuery = url.searchParams.get('liffId');
+  const pageFromQuery = url.searchParams.get('page');
+  const idFromQuery = url.searchParams.get('id');
+  const absoluteUrl = url.toString();
+
+  const lookupAccountByLiff = async (liffId: string | null): Promise<any> => {
+    if (!liffId) return null;
+    return db
+      .prepare(`SELECT * FROM line_accounts WHERE liff_id = ?`)
+      .bind(liffId)
+      .first<any>();
+  };
+  const lookupAccountById = async (id: string | null): Promise<any> => {
+    if (!id) return null;
+    return db.prepare(`SELECT * FROM line_accounts WHERE id = ?`).bind(id).first<any>();
+  };
+
+  // event: パス `/events/:id` または クエリ `?page=event&id=`
+  let eventId: string | null = null;
+  const eventPathMatch = pathname.match(/^\/events\/([^/]+)(?:\/(?:confirm|done))?\/?$/);
+  if (eventPathMatch) eventId = eventPathMatch[1];
+  else if (pageFromQuery === 'event' && idFromQuery) eventId = idFromQuery;
+
+  if (eventId) {
+    // liffId クエリでアカウントが特定できる場合は /api/liff/events/:id と
+    // 同じ可視性条件（deleted_at IS NULL, is_published=1, target アカウント所属）
+    // で event を取得する。未公開・削除済みのイベント情報を bot プレビューに
+    // 漏らさない。liffId が無いか不一致なら、最低限の公開条件のみ適用。
+    let event: any = null;
+    let account: any = null;
+
+    if (liffIdFromQuery) {
+      account = await lookupAccountByLiff(liffIdFromQuery);
+      if (account) {
+        event = await db
+          .prepare(
+            `SELECT * FROM events
+              WHERE id = ? AND deleted_at IS NULL AND is_published = 1 AND (
+                (target_type = 'single' AND line_account_id = ?)
+                OR (target_type = 'multi-account-dedup'
+                    AND EXISTS (SELECT 1 FROM json_each(account_ids) WHERE value = ?))
+              )`,
+          )
+          .bind(eventId, account.id, account.id)
+          .first<any>();
+      }
+    }
+
+    if (!event && !liffIdFromQuery) {
+      // liffId 指定が URL に無い場合（旧 /events/:id パス等）のみ、event 単独
+      // lookup と event 所属 account からの branding を許可する。
+      //
+      // liffId 指定があるのに strict query が空ということは「URL の liffId
+      // アカウントに属さない event」なので、ここで event 単独 lookup に落とすと
+      // 他アカの event 詳細・branding が bot プレビューに漏れる。event=null の
+      // まま外側のアカウントデフォルト OG（liffId 由来 account）にフォールバック
+      // させて漏洩を防ぐ。
+      account = null;
+      event = await db
+        .prepare(
+          `SELECT * FROM events WHERE id = ? AND deleted_at IS NULL AND is_published = 1`,
+        )
+        .bind(eventId)
+        .first<any>();
+      if (event && event.target_type === 'single' && event.line_account_id) {
+        // multi-account-dedup のときは line_account_id が sentinel なので
+        // branding に使わない（og:site_name は 'LINE' フォールバック）。
+        account = await lookupAccountById(event.line_account_id);
+      }
+    }
+
+    if (event) {
+      const og = resolveOgForEvent(event, account, absoluteUrl);
+      return buildOgHtml(og);
+    }
+  }
+
+  // form: クエリ `?page=form&id=`
+  if (pageFromQuery === 'form' && idFromQuery) {
+    const form = await db
+      .prepare(`SELECT * FROM forms WHERE id = ?`)
+      .bind(idFromQuery)
+      .first<any>();
+    if (form) {
+      const account = await lookupAccountByLiff(liffIdFromQuery);
+      const og = resolveOgForForm(form, account, absoluteUrl);
+      return buildOgHtml(og);
+    }
+  }
+
+  // フォールバック: アカウントデフォルトのみ
+  const account = await lookupAccountByLiff(liffIdFromQuery);
+  const og = resolveOgForAccount(account, absoluteUrl);
+  return buildOgHtml(og);
+}
+
 // 404 fallback — API paths return JSON 404, everything else serves from static assets (LIFF/admin)
-export const notFoundHandler = async (c: Parameters<typeof app.notFound>[0] extends (ctx: infer C) => unknown ? C : never) => {
-  const path = new URL(c.req.url).pathname;
+export async function notFoundHandler(
+  c: import('hono').Context<Env>,
+): Promise<Response> {
+  const url = new URL(c.req.url);
+  const path = url.pathname;
   if (path.startsWith('/api/') || path === '/webhook' || path === '/docs' || path === '/openapi.json') {
     return c.json({ success: false, error: 'Not found' }, 404);
   }
-  // Serve static assets (admin dashboard, LIFF pages)
-  if (c.env.ASSETS && typeof c.env.ASSETS.fetch === 'function') {
-    return c.env.ASSETS.fetch(c.req.raw);
-  }
-  return c.json({ success: false, error: 'Not found' }, 404);
-};
 
+  // Bot UA (LINE/X/Facebook 等のリンクプレビュー) → OGP HTML を返す
+  const ua = c.req.header('user-agent') || '';
+  if (isLinkPreviewBot(ua)) {
+    const html = await buildOgForLiffPath(c.env.DB, url);
+    return c.html(html);
+  }
+
+  // Serve static assets (admin dashboard, LIFF pages).
+  // ASSETS binding is missing when wrangler runs without a built `dist/client`
+  // (fresh clone, vitest, or a deploy where the assets directive was stripped).
+  // Without this guard every GET / surfaces as
+  // "TypeError: Cannot read properties of undefined (reading 'fetch')".
+  if (!c.env.ASSETS || typeof c.env.ASSETS.fetch !== 'function') {
+    return c.json({ success: false, error: 'Not found' }, 404);
+  }
+  return c.env.ASSETS.fetch(c.req.raw);
+}
 app.notFound(notFoundHandler);
 
 // Scheduled handler for cron triggers — runs for all active LINE accounts
@@ -575,31 +854,29 @@ async function scheduled(
   // 配信系は1回だけ実行（内部でfriendのline_account_idから正しいlineClientを動的解決）
   // 以前はアカウントごとにループしていたが、アカウントフィルタなしのDBクエリで
   // 全アカウントの配信が各ループで重複実行されていたバグを修正
-  const jobs = [];
-  jobs.push(
-    processStepDeliveries(env.DB, defaultLineClient, env.WORKER_URL),
-    processScheduledBroadcasts(env.DB, defaultLineClient, env.WORKER_URL),
-    processReminderDeliveries(env.DB, defaultLineClient),
-  );
-  // キュー処理は1回だけ実行（内部でアカウント別lineClientを解決する）
-  // ロック解除: タイムアウトでstuckした配信を復旧
+  // Phase 1: 復旧処理 (batch_offset=-1 → 0 にする軽量な UPDATE のみ) を queue 処理より
+  // 先に await 完了させる。これで stalled/stuck から復旧した配信が同じ cron tick の
+  // processQueuedBroadcasts に拾われ、復旧レイテンシが 1 tick 縮む。recover は inline 送信を
+  // 含まない高速処理なので、先に await しても他ジョブを starve させない。
   const { recoverStalledBroadcasts, recoverStuckDeliveries } = await import('@line-crm/db');
-  jobs.push(recoverStuckDeliveries(env.DB));
-  jobs.push(recoverStalledBroadcasts(env.DB));
-  jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
-  jobs.push(checkAccountHealth(env.DB));
-  jobs.push(refreshLineAccessTokens(env.DB));
+  await Promise.allSettled([
+    recoverStalledBroadcasts(env.DB),
+    recoverStuckDeliveries(env.DB),
+  ]);
 
-  await Promise.allSettled(jobs);
-
-  // Fetch broadcast insights (runs daily, self-throttled)
+  // Booking / event-booking リマインドは時刻厳守 + 軽量 (数件/tick、上限100件) なので、
+  // 重い配信・insight ジョブより先に実行する。以前は最後に置かれていたため、
+  // 手前のジョブが invocation を止めると数時間分のリマインドが未送信のまま
+  // starts_at を過ぎ、「開始後は送らない」ガードで永久 pending になる事故が
+  // 発生した (2026-06-01 / 2026-06-15、計 10 件送り漏れ)。
+  // token refresh はリマインドより先に済ませる (失効直後トークンでの 401 送信を防ぐ。
+  // 旧順序では refresh が先だった invariant の維持)。
   try {
-    await processInsightFetch(env.DB, lineClients, defaultLineClient);
+    await refreshLineAccessTokens(env.DB);
   } catch (e) {
-    console.error('Insight fetch error:', e);
+    console.error('token refresh error:', e);
   }
 
-  // Booking reminders — every 5-minute tick scans due reminders.
   try {
     const result = await processDueReminders(env.DB, {
       now: new Date(),
@@ -611,6 +888,41 @@ async function scheduled(
     }
   } catch (e) {
     console.error('booking-reminders error:', e);
+  }
+
+  try {
+    const result = await processDueEventReminders(env.DB, {
+      now: new Date(),
+      sender: sendEventBookingNotification,
+    });
+    if (result.sent + result.failed > 0) {
+      console.log(`[event-booking-reminders] sent=${result.sent} failed=${result.failed}`);
+    }
+  } catch (e) {
+    console.error('event-booking-reminders error:', e);
+  }
+
+  // Phase 2: 配信系と定期ジョブを並列実行する。processScheduledBroadcasts は tag/all の
+  // inline 送信を含み時間がかかり得るため、queue 処理と並列にして互いを block しない
+  // (barrier 化すると長い scheduled 送信が queue 処理を待たせる)。scheduled dedup は
+  // status='sending', batch_offset=0 に enqueue され、同 tick もしくは次 tick (最大5分、
+  // 5分 cron の粒度内) で processQueuedBroadcasts に拾われて分割送信される。
+  const jobs = [];
+  jobs.push(
+    processStepDeliveries(env.DB, defaultLineClient, env.WORKER_URL),
+    processScheduledBroadcasts(env.DB, defaultLineClient, env.WORKER_URL),
+    processReminderDeliveries(env.DB, defaultLineClient),
+  );
+  jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
+  jobs.push(checkAccountHealth(env.DB));
+
+  await Promise.allSettled(jobs);
+
+  // Fetch broadcast insights (runs daily, self-throttled)
+  try {
+    await processInsightFetch(env.DB, lineClients, defaultLineClient);
+  } catch (e) {
+    console.error('Insight fetch error:', e);
   }
 
   // Booking expirer — runs only on the 6h cron tick.
@@ -626,19 +938,6 @@ async function scheduled(
     } catch (e) {
       console.error('booking-expirer error:', e);
     }
-  }
-
-  // Event-booking reminders — every 5-minute tick scans due reminders.
-  try {
-    const result = await processDueEventReminders(env.DB, {
-      now: new Date(),
-      sender: sendEventBookingNotification,
-    });
-    if (result.sent + result.failed > 0) {
-      console.log(`[event-booking-reminders] sent=${result.sent} failed=${result.failed}`);
-    }
-  } catch (e) {
-    console.error('event-booking-reminders error:', e);
   }
 
   // Event-booking expirer — 6h cron tick.

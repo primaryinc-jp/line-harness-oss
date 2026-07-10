@@ -229,14 +229,14 @@ https://line-harness.your-account.workers.dev
 
 ```bash
 pnpm db:migrate
-# => wrangler d1 execute line-crm --file=packages/db/schema.sql
+# => wrangler d1 execute your-database --file=packages/db/schema.sql
 ```
 
 ### ローカル
 
 ```bash
 pnpm db:migrate:local
-# => wrangler d1 execute line-crm --file=packages/db/schema.sql --local
+# => wrangler d1 execute your-database --file=packages/db/schema.sql --local
 ```
 
 スキーマは `CREATE TABLE IF NOT EXISTS` を使用しているため、冪等に実行可能。既存テーブルはスキップされる。

@@ -30,6 +30,7 @@ export function expandVariables(
   content: string,
   friend: { id: string; display_name: string | null; user_id: string | null; ref_code?: string | null; metadata?: Record<string, unknown> | string | null },
   apiOrigin?: string,
+  messageType?: string,
 ): string {
   let result = content;
   result = result.replace(/\{\{name\}\}/g, friend.display_name || '');
@@ -53,10 +54,14 @@ export function expandVariables(
     if (val == null || val === '') return '';
     return inner;
   });
-  // Clean up broken JSON commas from removed conditional blocks (e.g. ",," or "[," or ",]")
-  result = result.replace(/,\s*,/g, ',');
-  result = result.replace(/\[\s*,/g, '[');
-  result = result.replace(/,\s*\]/g, ']');
+  // Clean up broken JSON commas from removed conditional blocks (e.g. ",," or "[," or ",]").
+  // Flex only: this is JSON repair — running it on plain text silently rewrote
+  // user-authored bodies containing ",," / "[," / ",]" (bug present since initial release).
+  if (messageType === 'flex') {
+    result = result.replace(/,\s*,/g, ',');
+    result = result.replace(/\[\s*,/g, '[');
+    result = result.replace(/,\s*\]/g, ']');
+  }
   result = result.replace(/\{\{metadata\.([^}]+)\}\}/g, (_match, key) => {
     const val = meta[key];
     if (val == null) return '';
@@ -191,7 +196,11 @@ async function processSingleDelivery(
         const jumpStep = steps.find((s) => s.step_order === currentStep.next_step_on_false);
         if (jumpStep) {
           const jitteredDate = jitterDeliveryTime(nextDeliveryFor(jumpStep));
-          await advanceFriendScenario(db, fs.id, currentStep.step_order, jitteredDate.toISOString().slice(0, -1) + '+09:00');
+          // Advance to just before the jump target so the next tick's
+          // `find(step_order > current_step_order)` selects jumpStep itself.
+          // Passing currentStep.step_order here (pre-fix) delivered the
+          // sequentially-next step and silently ignored next_step_on_false.
+          await advanceFriendScenario(db, fs.id, jumpStep.step_order - 1, jitteredDate.toISOString().slice(0, -1) + '+09:00');
           return false;
         }
       }
@@ -213,20 +222,23 @@ async function processSingleDelivery(
   // Expand template variables ({{name}}, {{uid}}, {{auth_url:CHANNEL_ID}}, {{metadata.KEY}}, etc.)
   const resolvedMeta = await resolveMetadata(db, { user_id: (friend as unknown as Record<string, string | null>).user_id, metadata: (friend as unknown as Record<string, string | null>).metadata });
   const friendWithMeta = { ...friend, metadata: resolvedMeta } as Parameters<typeof expandVariables>[1];
-  const expandedContent = expandVariables(resolved.messageContent, friendWithMeta, workerUrl);
+  const expandedContent = expandVariables(resolved.messageContent, friendWithMeta, workerUrl, resolved.messageType);
   // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
+  // リンクの所有アカウントは実際に配信するアカウント (= friend の account) に合わせる
+  const friendAccountId = (friend as unknown as Record<string, string | null>).line_account_id;
   let trackedType: string = resolved.messageType;
   let trackedContent = expandedContent;
   if (workerUrl) {
     const { autoTrackContent } = await import('./auto-track.js');
-    const tracked = await autoTrackContent(db, resolved.messageType, expandedContent, workerUrl);
+    const tracked = await autoTrackContent(db, resolved.messageType, expandedContent, workerUrl, {
+      lineAccountId: friendAccountId ?? null,
+    });
     trackedType = tracked.messageType;
     trackedContent = tracked.content;
   }
   const message = buildMessage(trackedType, trackedContent);
   // Resolve the correct LINE client for this friend's account
   let deliveryClient = lineClient;
-  const friendAccountId = (friend as unknown as Record<string, string | null>).line_account_id;
   if (friendAccountId) {
     const { getLineAccountById } = await import('@line-crm/db');
     const account = await getLineAccountById(db, friendAccountId);
@@ -274,72 +286,112 @@ async function processSingleDelivery(
   return true;
 }
 
+/** Supported scenario step condition_type values evaluated at delivery time. */
 export const SUPPORTED_CONDITION_TYPES = [
   'tag_exists',
   'tag_not_exists',
   'metadata_equals',
   'metadata_not_equals',
 ] as const;
+export type ConditionType = (typeof SUPPORTED_CONDITION_TYPES)[number];
 
-export function isSupportedConditionType(value: unknown): value is (typeof SUPPORTED_CONDITION_TYPES)[number] {
+export function isSupportedConditionType(value: unknown): value is ConditionType {
   return typeof value === 'string' && (SUPPORTED_CONDITION_TYPES as readonly string[]).includes(value);
 }
 
+/**
+ * Evaluate a scenario step's condition_type/condition_value at delivery time.
+ *
+ * Semantics:
+ *  - condition_type null/empty (no condition configured) → `true` (deliver normally).
+ *  - condition_type set but condition_value missing/empty → `false` (skip + log).
+ *    This is the same OSS issue #120 over-delivery pattern: a configured condition with
+ *    no value would otherwise match every friend, e.g. tag_not_exists with empty value
+ *    binds '' into the SQL and returns 0 rows → "tag absent" for everyone.
+ *  - unknown condition_type or malformed condition_value JSON → `false` (skip + log).
+ *  - condition_type + condition_value valid → actually evaluate.
+ */
 export async function evaluateCondition(
   db: D1Database,
   friendId: string,
   step: { condition_type: string | null; condition_value: string | null },
 ): Promise<boolean> {
+  // No condition configured at all → deliver as usual.
   if (!step.condition_type) return true;
+
   if (!isSupportedConditionType(step.condition_type)) {
-    console.error(`[scenario] unsupported condition_type: ${step.condition_type}`);
-    return false;
-  }
-  if (!step.condition_value) {
-    console.error(`[scenario] missing condition_value for condition_type: ${step.condition_type}`);
+    console.error(
+      `[scenario] unknown condition_type "${step.condition_type}" for friend=${friendId} — skipping step. ` +
+        `Supported types: ${SUPPORTED_CONDITION_TYPES.join(', ')}`,
+    );
     return false;
   }
 
-  try {
-    switch (step.condition_type) {
-      case 'tag_exists': {
-        const tag = await db
-          .prepare('SELECT 1 FROM friend_tags WHERE friend_id = ? AND tag_id = ?')
-          .bind(friendId, step.condition_value)
-          .first();
-        return !!tag;
-      }
-      case 'tag_not_exists': {
-        const tag = await db
-          .prepare('SELECT 1 FROM friend_tags WHERE friend_id = ? AND tag_id = ?')
-          .bind(friendId, step.condition_value)
-          .first();
-        return !tag;
-      }
-      case 'metadata_equals':
-      case 'metadata_not_equals': {
-        const parsed = JSON.parse(step.condition_value) as { key?: unknown; value?: unknown };
-        if (typeof parsed.key !== 'string' || !Object.prototype.hasOwnProperty.call(parsed, 'value')) {
-          console.error('[scenario] malformed metadata condition_value');
-          return false;
-        }
-        const friend = await db
-          .prepare('SELECT metadata FROM friends WHERE id = ?')
-          .bind(friendId)
-          .first<{ metadata: string }>();
-        let metadata: Record<string, unknown> = {};
-        try {
-          metadata = JSON.parse(friend?.metadata || '{}') as Record<string, unknown>;
-        } catch {
-          metadata = {};
-        }
-        const matches = metadata[parsed.key] === parsed.value;
-        return step.condition_type === 'metadata_equals' ? matches : !matches;
-      }
-    }
-  } catch (err) {
-    console.error('[scenario] condition evaluation failed', err);
+  if (!step.condition_value) {
+    console.error(
+      `[scenario] condition_type=${step.condition_type} is set but condition_value is empty for friend=${friendId} — skipping step`,
+    );
     return false;
+  }
+
+  switch (step.condition_type) {
+    case 'tag_exists': {
+      const tag = await db
+        .prepare('SELECT 1 FROM friend_tags WHERE friend_id = ? AND tag_id = ?')
+        .bind(friendId, step.condition_value)
+        .first();
+      return !!tag;
+    }
+    case 'tag_not_exists': {
+      const tag = await db
+        .prepare('SELECT 1 FROM friend_tags WHERE friend_id = ? AND tag_id = ?')
+        .bind(friendId, step.condition_value)
+        .first();
+      return !tag;
+    }
+    case 'metadata_equals':
+    case 'metadata_not_equals': {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(step.condition_value);
+      } catch {
+        console.error(
+          `[scenario] malformed condition_value JSON for friend=${friendId} type=${step.condition_type} — skipping step`,
+        );
+        return false;
+      }
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        Array.isArray(raw) ||
+        typeof (raw as { key?: unknown }).key !== 'string' ||
+        !('value' in (raw as Record<string, unknown>))
+      ) {
+        // 既存行や直接 INSERT された行で {"key":"x"} のように value が欠落しているケースは
+        // friend.metadata[x] === undefined と比較されて「key 不在の全友だち」に一致する
+        // (= 同じ OSS issue #120 の over-delivery を再現する) ので明示的にスキップする。
+        console.error(
+          `[scenario] condition_value missing key/value for friend=${friendId} type=${step.condition_type} — skipping step`,
+        );
+        return false;
+      }
+      const parsed = raw as { key: string; value: unknown };
+      const friend = await db
+        .prepare('SELECT metadata FROM friends WHERE id = ?')
+        .bind(friendId)
+        .first<{ metadata: string }>();
+      let metadata: Record<string, unknown> = {};
+      try {
+        metadata = JSON.parse(friend?.metadata || '{}') as Record<string, unknown>;
+      } catch {
+        // Friend metadata corruption shouldn't propagate; treat as empty map.
+        metadata = {};
+      }
+      const actual = metadata[parsed.key];
+      return step.condition_type === 'metadata_equals'
+        ? actual === parsed.value
+        : actual !== parsed.value;
+    }
   }
 }
 

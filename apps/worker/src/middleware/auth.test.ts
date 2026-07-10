@@ -13,8 +13,8 @@ vi.mock('@line-crm/db', () => ({
   }),
 }));
 
-const PAGES = 'https://line-crm-admin.pages.dev';
-const WORKERS = 'https://line-crm-worker.line-crm-api.workers.dev';
+const PAGES = 'https://your-admin.pages.dev';
+const WORKERS = 'https://your-worker.your-subdomain.workers.dev';
 
 function env(overrides: Partial<Env['Bindings']> = {}): Env['Bindings'] {
   return {
@@ -239,6 +239,30 @@ describe('CORS allowed / blocked origins', () => {
       headers: { Origin: PAGES, Cookie: 'lh_admin_session=staff-key' },
     }, crossSiteEnv());
     expect(res.headers.get('Access-Control-Allow-Origin')).toBe(PAGES);
+    expect(res.headers.get('Access-Control-Allow-Credentials')).toBe('true');
+  });
+
+  test('Cloudflare Pages preview origin for the admin project is echoed back', async () => {
+    const preview = 'https://abc123.your-admin.pages.dev';
+    const res = await app().request('/api/protected', {
+      headers: { Origin: preview, Cookie: 'lh_admin_session=staff-key' },
+    }, crossSiteEnv());
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe(preview);
+    expect(res.headers.get('Access-Control-Allow-Credentials')).toBe('true');
+  });
+
+  test('login preflight succeeds from a Cloudflare Pages preview origin', async () => {
+    const preview = 'https://abc123.your-admin.pages.dev';
+    const res = await app().request('/api/auth/login', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: preview,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type',
+      },
+    }, crossSiteEnv());
+    expect(res.status).toBe(204);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe(preview);
     expect(res.headers.get('Access-Control-Allow-Credentials')).toBe('true');
   });
 

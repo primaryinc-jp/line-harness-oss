@@ -1,4 +1,5 @@
 import { createTrackedLink } from '@line-crm/db';
+import { resolveTrackedLinkBaseUrl } from '../lib/link-base-url.js';
 
 // Domains where Universal Links / App Links should be used
 const APP_LINK_DOMAINS = new Set([
@@ -45,22 +46,25 @@ const URL_REGEX = /https?:\/\/[^\s"'<>\])}]+/g;
 
 // URLs that should NOT be wrapped (internal/system URLs)
 const SKIP_PATTERNS = [
-  /\/t\/[0-9a-f-]{36}/,       // already a tracking link
+  /\/t\/[0-9a-f-]{36}/,       // already a tracking link (legacy UUID form)
   /liff\.line\.me/,            // LIFF URLs
   /line\.me\/R\//,             // LINE deep links
-  /line-harness.*\.workers\.dev/, // default LINE Harness worker URLs
+  /your-worker-name/,           // our own worker
 ];
 
-function shouldSkip(url: string): boolean {
-  return SKIP_PATTERNS.some((p) => p.test(url));
+function shouldSkip(url: string, skipPrefixes: string[]): boolean {
+  if (SKIP_PATTERNS.some((p) => p.test(url))) return true;
+  // Short-code tracking links (/t/Ab3xY9k) don't match the UUID pattern, so
+  // skip anything under our own worker or the configured short domain.
+  return skipPrefixes.some((prefix) => prefix && url.startsWith(`${prefix}/t/`));
 }
 
 /** Extract trackable URLs from content string */
-function extractUrls(content: string): Set<string> {
+function extractUrls(content: string, skipPrefixes: string[]): Set<string> {
   const urls = new Set<string>();
   for (const match of content.matchAll(URL_REGEX)) {
     const url = match[0].replace(/[.,;:!?)]+$/, '');
-    if (!shouldSkip(url)) urls.add(url);
+    if (!shouldSkip(url, skipPrefixes)) urls.add(url);
   }
   return urls;
 }
@@ -69,16 +73,19 @@ function extractUrls(content: string): Set<string> {
 async function createTrackingMap(
   db: D1Database,
   urls: Set<string>,
-  workerUrl: string,
+  linkBase: string,
+  lineAccountId?: string | null,
 ): Promise<Map<string, { trackingUrl: string; originalUrl: string; label: string }>> {
   const urlMap = new Map<string, { trackingUrl: string; originalUrl: string; label: string }>();
   for (const url of urls) {
     const link = await createTrackedLink(db, {
       name: `auto: ${url.slice(0, 60)}`,
       originalUrl: url,
+      lineAccountId: lineAccountId ?? null,
     });
-    // Use direct /t/ URL — Worker handles LINE app detection and LIFF redirect server-side
-    const trackingUrl = `${workerUrl}/t/${link.id}`;
+    // /t/ URL — Worker handles LINE app detection and LIFF redirect server-side.
+    // Prefer the short code (linkBase may be a branded short domain).
+    const trackingUrl = `${linkBase}/t/${link.short_code ?? link.id}`;
     const hostname = new URL(url).hostname.replace('www.', '');
     const label = hostname.length > 20 ? hostname.slice(0, 20) + '…' : hostname;
     urlMap.set(url, { trackingUrl, originalUrl: url, label });
@@ -152,6 +159,16 @@ export interface AutoTrackResult {
   content: string;
 }
 
+export interface AutoTrackOptions {
+  /**
+   * LINE account that owns the created tracked links. /t/:linkId uses this to
+   * redirect LINE in-app clicks to the owning account's LIFF (instead of the
+   * global env.LIFF_URL) so friends of that account never see another
+   * account's consent screen.
+   */
+  lineAccountId?: string | null;
+}
+
 /**
  * Auto-wrap URLs in message content with tracking links.
  * For text messages with URLs, converts to Flex with button.
@@ -162,11 +179,23 @@ export async function autoTrackContent(
   messageType: string,
   content: string,
   workerUrl: string,
+  options?: AutoTrackOptions,
 ): Promise<AutoTrackResult> {
   if (messageType === 'image') return { messageType, content };
 
-  const urls = extractUrls(content);
+  // Extract first so URL-free messages (the common case in per-friend
+  // delivery loops) skip the settings lookup entirely.
+  const workerBase = workerUrl.replace(/\/$/, '');
+  let urls = extractUrls(content, [workerBase]);
   if (urls.size === 0) return { messageType, content };
+
+  // Branded short domain (tracked_link_base_url) when configured, else workerUrl.
+  // Re-filter: short-domain /t links are already tracked — never re-wrap them.
+  const linkBase = await resolveTrackedLinkBaseUrl(db, workerUrl);
+  if (linkBase !== workerBase) {
+    urls = new Set([...urls].filter((u) => !u.startsWith(`${linkBase}/t/`)));
+    if (urls.size === 0) return { messageType, content };
+  }
 
   // Text messages: app-link domain (YouTube / X / TikTok 等) は raw URL を残して
   //   `?openExternalBrowser=1` だけ付ける。LINE 上で rich preview (YT サムネ等) が
@@ -179,7 +208,7 @@ export async function autoTrackContent(
     // (無駄な link_clicks レコード防止)。
     const trackable = new Set([...urls].filter((u) => !isAppLinkDomain(u)));
     const urlMap = trackable.size > 0
-      ? await createTrackingMap(db, trackable, workerUrl)
+      ? await createTrackingMap(db, trackable, linkBase, options?.lineAccountId)
       : new Map<string, { trackingUrl: string; originalUrl: string; label: string }>();
 
     let result = content;
@@ -198,7 +227,7 @@ export async function autoTrackContent(
 
   // Flex messages → replace URLs inline in the JSON
   // For app-link domains, also inject openExternalBrowser=1 into the URI action
-  const urlMap = await createTrackingMap(db, urls, workerUrl);
+  const urlMap = await createTrackingMap(db, urls, linkBase, options?.lineAccountId);
   let result = content;
   for (const [original, { trackingUrl, originalUrl }] of urlMap) {
     const finalUrl = isAppLinkDomain(originalUrl)

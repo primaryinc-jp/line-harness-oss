@@ -5,14 +5,15 @@ import { authHeader, throwHttpError, workersApiBase } from './_shared.js';
  * Cloudflare Workers binding shape used by the Workers Scripts API.
  *
  * Only the binding types we care about for the LINE Harness Worker are
- * modelled here: env-style plain text, secrets, and resource bindings for
- * D1, R2, and KV. Other types (`service`, `queue`, `analytics_engine`, …)
- * are intentionally left unsupported in v1 — callers should fail loudly if
- * the deployed Worker uses an unsupported binding type so we don't silently
- * drop it on update.
+ * modelled here: env-style plain text, secrets, resource bindings for
+ * D1, R2, and KV, and the Workers Assets binding (CLI installs serve the
+ * LIFF SPA from Worker assets). Other types (`service`, `queue`,
+ * `analytics_engine`, …) are intentionally left unsupported in v1 —
+ * callers should fail loudly if the deployed Worker uses an unsupported
+ * binding type so we don't silently drop it on update.
  */
 export interface WorkerBinding {
-  type: 'plain_text' | 'secret_text' | 'd1' | 'r2_bucket' | 'kv_namespace';
+  type: 'plain_text' | 'secret_text' | 'd1' | 'r2_bucket' | 'kv_namespace' | 'assets';
   name: string;
   database_id?: string;
   bucket_name?: string;
@@ -33,6 +34,15 @@ const DEFAULT_COMPATIBILITY_DATE = '2024-12-01';
  *
  * Throws on non-2xx with a body excerpt so caller logs include the API's
  * error reason.
+ *
+ * `keepAssets: true` sets the API's `keep_assets` flag so a script-only
+ * update retains the assets of the previous version — required for CLI
+ * installs, where the Worker serves the LIFF SPA via Workers Assets and the
+ * release bundle carries no asset files.
+ *
+ * `compatibilityFlags` must include every flag the current deployment uses
+ * (the upload REPLACES metadata; omitting `nodejs_compat` would strip it
+ * and break every `node:*` import in the Worker).
  */
 export async function putWorkerScript(opts: {
   creds: CfApiCreds;
@@ -40,15 +50,23 @@ export async function putWorkerScript(opts: {
   scriptContent: Buffer;
   bindings: WorkerBinding[];
   compatibilityDate?: string;
+  compatibilityFlags?: string[];
+  keepAssets?: boolean;
 }): Promise<void> {
   const { creds, scriptName, scriptContent, bindings } = opts;
   const compatibility_date = opts.compatibilityDate ?? DEFAULT_COMPATIBILITY_DATE;
 
-  const metadata = {
+  const metadata: Record<string, unknown> = {
     main_module: 'worker.js',
     bindings,
     compatibility_date,
   };
+  if (opts.compatibilityFlags && opts.compatibilityFlags.length > 0) {
+    metadata.compatibility_flags = opts.compatibilityFlags;
+  }
+  if (opts.keepAssets) {
+    metadata.keep_assets = true;
+  }
 
   const fd = new FormData();
   fd.set(

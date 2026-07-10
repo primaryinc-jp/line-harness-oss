@@ -695,4 +695,82 @@ describe('processMultiAccountDedupBroadcast', () => {
     expect(last.sentIdentKeys).toHaveLength(501);
     expect(last.sentIdentKeys[500]).toBe('f500');
   });
+
+  // ---- 分割送信 (chunking) ----
+  // 1 実行が時間バジェット(maxRunMs)を超えたら、残りは次の cron tick に回して yield する。
+  // これで 5000 人配信でも 1 実行が短く終わり、Worker 時間制限で stall しなくなる。
+
+  it('time budget exceeded mid-send: yields with complete=false, persists only sent batches', async () => {
+    const N = 1000; // 2 batches (500 + 500)
+    const { db, progressUpdates } = makeSendDb({
+      selectedCounts: [{ line_account_id: 'acc1', cnt: N }],
+      rankedRows: Array.from({ length: N }, (_, i) => ({
+        friend_id: `f${i}`, line_user_id: `u${i}`, line_account_id: 'acc1',
+      })),
+      accountMeta: [{ id: 'acc1', name: 'A1', country: 'JP' }],
+    });
+    vi.mocked(getLineAccountById).mockImplementation(async (_db: D1Database, id: string) =>
+      id === 'acc1' ? ({ id, channel_access_token: 'tok1', is_active: 1 } as never) : null,
+    );
+    const clients: MockLineClient[] = [];
+    const factory = (token: string) => {
+      const c = new MockLineClient(token);
+      clients.push(c);
+      return c as unknown as LineClient;
+    };
+
+    // clock: 1回目=startMs(0)。2回目以降(=batch2のバジェット判定)は budget 超過を返す。
+    // batch1 は sentAnyBatch=false なので clock を呼ばず必ず送る → 前進保証。
+    let nowCalls = 0;
+    const now = () => {
+      nowCalls += 1;
+      return nowCalls <= 1 ? 0 : 1_000_000;
+    };
+
+    const result = await processMultiAccountDedupBroadcast(
+      db,
+      { id: 'b-yield', account_ids: '["acc1"]', dedup_priority: '["acc1"]', message_type: 'text', message_content: 'hello' },
+      factory,
+      { maxRunMs: 15_000, now },
+    );
+
+    expect(result.complete).toBe(false); // 途中で yield した
+    const c = clients.find((x) => x.token === 'tok1');
+    expect(c?.calls.length).toBe(1); // batch1 (500人) だけ送信、batch2 は次 tick
+    expect(result.successCount).toBe(500);
+    const last = JSON.parse(progressUpdates[progressUpdates.length - 1].progress as string);
+    expect(last.sentIdentKeys).toHaveLength(500); // 送った分の進捗は永続化済み
+  });
+
+  it('within time budget: sends all batches and reports complete=true', async () => {
+    const N = 1000; // 2 batches
+    const { db } = makeSendDb({
+      selectedCounts: [{ line_account_id: 'acc1', cnt: N }],
+      rankedRows: Array.from({ length: N }, (_, i) => ({
+        friend_id: `f${i}`, line_user_id: `u${i}`, line_account_id: 'acc1',
+      })),
+      accountMeta: [{ id: 'acc1', name: 'A1', country: 'JP' }],
+    });
+    vi.mocked(getLineAccountById).mockImplementation(async (_db: D1Database, id: string) =>
+      id === 'acc1' ? ({ id, channel_access_token: 'tok1', is_active: 1 } as never) : null,
+    );
+    const clients: MockLineClient[] = [];
+    const factory = (token: string) => {
+      const c = new MockLineClient(token);
+      clients.push(c);
+      return c as unknown as LineClient;
+    };
+
+    const result = await processMultiAccountDedupBroadcast(
+      db,
+      { id: 'b-complete', account_ids: '["acc1"]', dedup_priority: '["acc1"]', message_type: 'text', message_content: 'hello' },
+      factory,
+      { now: () => 0 }, // clock が進まない → バジェット超過しない
+    );
+
+    expect(result.complete).toBe(true);
+    const c = clients.find((x) => x.token === 'tok1');
+    expect(c?.calls.length).toBe(2); // 両 batch 送信
+    expect(result.successCount).toBe(1000);
+  });
 });

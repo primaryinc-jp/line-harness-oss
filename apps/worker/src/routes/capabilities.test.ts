@@ -20,6 +20,12 @@ type CapabilitiesResponse = {
     identity: {
       primaryKey: string;
       supportedLinks: string[];
+      targets: {
+        types: string[];
+        primaryKey: string;
+        acceptedIds: string[];
+        friendsAddressable: boolean;
+      };
     };
     endpoints: Record<string, string>;
   };
@@ -48,6 +54,9 @@ describe('GET /api/capabilities', () => {
     expect(body.data.features).toContain('friends');
     expect(body.data.features).toContain('broadcasts');
     expect(body.data.features).toContain('staff');
+    expect(body.data.features).toContain('targets');
+    expect(body.data.features).toContain('group_conversations');
+    expect(body.data.endpoints.targets).toBe('/api/targets');
     expect(body.data.min_app_version).toBeDefined();
     expect(body.data.product).toBe('line-harness');
     expect(body.data.platform).toBe('line');
@@ -55,6 +64,14 @@ describe('GET /api/capabilities', () => {
     expect(body.data.identity.primaryKey).toBe('line_friend_id');
     expect(body.data.identity.supportedLinks).toContain('x_user_id');
     expect(body.data.identity.supportedLinks).toContain('ig_igsid');
+    // Target identity contract: consumers must be able to tell what a
+    // canonical target id is and that friends are not addressable as targets
+    expect(body.data.identity.targets).toEqual({
+      types: ['group', 'room'],
+      primaryKey: 'target_id',
+      acceptedIds: ['target_id', 'line_group_id', 'line_room_id'],
+      friendsAddressable: false,
+    });
     expect(body.data.endpoints.staffMe).toBe('/api/staff/me');
     expect(body.data.endpoints.trackedLinks).toBe('/api/tracked-links');
   });

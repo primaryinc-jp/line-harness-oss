@@ -1,14 +1,24 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getClient } from "../client.js";
-import { autoTrackUrls } from "./auto-track-urls.js";
 
 export function registerSendMessage(server: McpServer): void {
   server.tool(
     "send_message",
-    "Send a text, image, or flex message to a specific friend. Use messageType 'image' for standalone image messages, 'flex' for rich card layouts.",
+    "Send a text, image, or flex message to a specific friend, or to a group/room target when targetType+targetId are given. Use messageType 'image' for standalone image messages, 'flex' for rich card layouts.",
     {
-      friendId: z.string().describe("The friend's ID to send the message to"),
+      friendId: z
+        .string()
+        .optional()
+        .describe("The friend's ID to send the message to. Omit when using targetType+targetId."),
+      targetType: z
+        .enum(["group", "room"])
+        .optional()
+        .describe("Set together with targetId to send to a group/room instead of a friend."),
+      targetId: z
+        .string()
+        .optional()
+        .describe("Group/room target ID (from manage_targets list)."),
       content: z
         .string()
         .describe(
@@ -30,7 +40,7 @@ export function registerSendMessage(server: McpServer): void {
         .boolean()
         .default(false)
         .describe(
-          "Mark as test send. Prepends 【テスト配信】 to text messages, adds test banner to flex messages.",
+          "Prepend a 【テスト配信】 label to text messages / add a test banner to flex messages. NOT a dry run: the message is still actually delivered to the recipient — including every member of a group/room — with normal notifications and billing.",
         ),
       senderMode: z
         .enum(["official", "self"])
@@ -40,10 +50,32 @@ export function registerSendMessage(server: McpServer): void {
         .string()
         .optional()
         .describe("Staff ID to send as. Only owner credentials can select another staff member."),
+      trackLinks: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Set false to disable automatic URL shortening (/t/ tracking links, created server-side per LINE account). URLs are sent as-is. Default true.",
+        ),
     },
-    async ({ friendId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
+    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId, trackLinks }) => {
       try {
         const client = getClient();
+        // Destination must be exactly one of friendId XOR (targetType+targetId).
+        // Ambiguous or partial input fails BEFORE sending: an LLM leaving a
+        // stale friendId alongside a target (or vice versa) must not silently
+        // pick one and deliver to the wrong conversation.
+        const hasTarget = Boolean(targetType || targetId);
+        if (friendId && hasTarget) {
+          throw new Error(
+            "Specify exactly one destination: either friendId OR targetType+targetId, not both",
+          );
+        }
+        if (hasTarget && !(targetType && targetId)) {
+          throw new Error("targetType and targetId must both be provided to send to a group/room");
+        }
+        if (!friendId && !hasTarget) {
+          throw new Error("A destination is required: friendId, or targetType+targetId");
+        }
 
         // Add test label
         let finalContent = content;
@@ -71,21 +103,28 @@ export function registerSendMessage(server: McpServer): void {
           }
         }
 
-        // Auto-track URLs in flex messages
-        const { content: trackedContent } = await autoTrackUrls(
-          client,
-          finalContent,
-          messageType,
-          `DM to ${friendId.slice(0, 8)}`,
-        );
-
-        const result = await client.friends.sendMessage(
-          friendId,
-          trackedContent,
-          messageType,
-          altText,
-          senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined,
-        );
+        // URL の短縮 (auto-track) は worker が送信時に行う (friend/target の所属
+        // アカウント付きでリンクを所有させるため、ここでは変換しない)。
+        // trackLinks=false は API に渡して worker 側の短縮もスキップさせる。
+        const senderSelection = senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined;
+        const result = targetType && targetId
+          ? await client.targets.sendMessage(
+              targetType,
+              targetId,
+              finalContent,
+              messageType,
+              altText,
+              senderSelection,
+              { trackLinks },
+            )
+          : await client.friends.sendMessage(
+              friendId!,
+              finalContent,
+              messageType,
+              altText,
+              senderSelection,
+              { trackLinks },
+            );
         return {
           content: [
             {

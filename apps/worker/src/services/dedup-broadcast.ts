@@ -194,7 +194,19 @@ export interface ProcessMultiAccountDedupResult {
   totalCount: number;
   successCount: number;
   failedAccountIds: string[];
+  // false = この実行は時間バジェットに達して途中で yield した (まだ未送の人が残る)。
+  // caller は status='sent' にせず batch_offset=0 に戻して次の cron tick に継続させる。
+  // true = 全 account を送り切った (= 完了)。caller が status='sent' にする。
+  complete: boolean;
 }
+
+// 1 回の cron 実行でこの時間 (ms) を超えたら、残りは次の tick に回して yield する。
+// これにより 1 実行が常に短く終わり、Cloudflare Worker の時間制限に達して stall する
+// ことが構造的に無くなる (5000 人でも数 tick に分割されて淡々と進む)。stagger sleep も
+// この経過時間に含まれる。判定は次 batch の sleep+multicast の「前」に行うため、超過判定
+// 時点から更に 1 batch 分 (最大 ~5s sleep + multicast) はみ出し得る。それを見込んで Worker
+// CPU 制限 (約30s) に対し十分な余裕を取った 10s に設定する (実効ロック保持は最大 ~15-18s)。
+const MAX_RUN_MS = 10_000;
 
 /**
  * Send a multi-account-dedup broadcast.
@@ -272,7 +284,19 @@ export async function processMultiAccountDedupBroadcast(
     aggregation_unit?: string | null;
   },
   lineClientFactory: (token: string) => LineClient = (t) => new LineClient(t),
+  opts: { maxRunMs?: number; now?: () => number } = {},
 ): Promise<ProcessMultiAccountDedupResult> {
+  // 時間バジェット制御 (テストでは clock を注入して yield を決定的に再現できる)。
+  // 変数名は clock — batch ループ内の `const now = jstNow()` (timestamp 文字列) と
+  // 衝突させないため。
+  const clock = opts.now ?? (() => Date.now());
+  const maxRunMs = opts.maxRunMs ?? MAX_RUN_MS;
+  const startMs = clock();
+  // 1 batch でも送ったら true。時間切れでも最低 1 batch は進めて前進を保証する
+  // (毎 tick 必ず success_count が伸びる → 永久に同じ所で足踏みしない)。
+  let sentAnyBatch = false;
+  let timeExceeded = false;
+
   const accountIds = (broadcast.account_ids ? JSON.parse(broadcast.account_ids) : []) as string[];
   const dedupPriority = (broadcast.dedup_priority ? JSON.parse(broadcast.dedup_priority) : []) as string[];
 
@@ -311,6 +335,7 @@ export async function processMultiAccountDedupBroadcast(
   const unit = broadcast.aggregation_unit ?? fallbackUnit;
 
   for (const accountResult of preview.perAccount) {
+    if (timeExceeded) break; // 時間バジェット超過 — 残アカウントは次の cron tick で処理
     const account = await getLineAccountById(db, accountResult.accountId);
     if (!account || !account.is_active) {
       console.log(`[multi-account-dedup] skipping inactive/missing account ${accountResult.accountId}`);
@@ -344,6 +369,13 @@ export async function processMultiAccountDedupBroadcast(
       for (let i = 0; i < remaining.length; i += MULTICAST_BATCH_SIZE) {
         const batchIdx = Math.floor(i / MULTICAST_BATCH_SIZE);
         const batch = remaining.slice(i, i + MULTICAST_BATCH_SIZE);
+
+        // 時間バジェットを超えたら、残りは次の cron tick に回して yield する。
+        // ただし最低 1 batch は必ず送る (sentAnyBatch ガード) ことで毎 tick 前進を保証。
+        if (sentAnyBatch && clock() - startMs > maxRunMs) {
+          timeExceeded = true;
+          break;
+        }
 
         if (batchIdx > 0) {
           await sleep(calculateStaggerDelay(remaining.length, batchIdx));
@@ -381,6 +413,7 @@ export async function processMultiAccountDedupBroadcast(
           ).bind(JSON.stringify(progress), progress.sentIdentKeys.length, broadcast.id),
         ];
         await db.batch(stmts);
+        sentAnyBatch = true; // 1 batch 以上 durable に記録した → 前進保証 & yield 可
       }
     } catch (err) {
       console.error(`[multi-account-dedup] account ${account.id} failed:`, err);
@@ -410,5 +443,8 @@ export async function processMultiAccountDedupBroadcast(
   // この関数の return 後・status='sent' 確定前に Worker crash した場合は dedup_progress
   // が残ったままで status='sending', batch_offset=-1 になり、recoverStalledBroadcasts が
   // 再投入して resume → 完走済みアカは batchOffset >= recipients.length で skip → 重複なし。
-  return { totalCount, successCount, failedAccountIds };
+  //
+  // complete=false (timeExceeded) のときは caller が status='sent' にせず batch_offset=0 に
+  // 戻し、次の cron tick が getQueuedBroadcasts で拾って残りを送る (= 分割送信)。
+  return { totalCount, successCount, failedAccountIds, complete: !timeExceeded };
 }

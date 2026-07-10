@@ -35,12 +35,41 @@ import type {
   PoolAccount,
 } from '@line-crm/shared'
 
+/** Affiliate offer (案件) as returned by the worker. */
+export type AffiliateOffer = {
+  id: string
+  name: string
+  description: string | null
+  rewardAmount: number | null
+  lineAccountId: string | null
+  tagId: string | null
+  scenarioId: string | null
+  isActive: boolean
+  createdAt: string
+}
+
+/** Approval queue row as returned by /api/conversions/approvals */
+export type ConversionApprovalItem = {
+  eventId: string
+  createdAt: string
+  friendId: string
+  friendName: string | null
+  affiliateId: string
+  affiliateName: string | null
+  offerName: string | null
+  conversionPointName: string | null
+  value: number | null
+  approvalStatus: 'pending' | 'approved' | 'rejected'
+  duplicateFlag: boolean
+}
+
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
   targetType: BroadcastTargetType;
   accountIds: string[] | null;
   dedupPriority: string[] | null;
   failedAccountIds: string[] | null;
+  trackLinks: boolean;
 };
 
 export type BroadcastInsight = {
@@ -291,6 +320,7 @@ export const api = {
       lineAccountId?: string | null
       accountIds?: string[]
       dedupPriority?: string[]
+      trackLinks?: boolean
     }) =>
       fetchApi<ApiResponse<ApiBroadcast>>('/api/broadcasts', {
         method: 'POST',
@@ -305,6 +335,7 @@ export const api = {
         targetType?: ApiBroadcast['targetType']
         targetTagId?: string | null
         scheduledAt?: string | null
+        trackLinks?: boolean
       }
     ) =>
       fetchApi<ApiResponse<ApiBroadcast>>(`/api/broadcasts/${id}`, {
@@ -389,6 +420,20 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ accountId, friendIds }),
       }),
+    getLinkBaseUrl: () =>
+      fetchApi<{ success: boolean; data: string | null }>('/api/account-settings/link-base-url'),
+    updateLinkBaseUrl: (value: string) =>
+      fetchApi<{ success: boolean; error?: string }>('/api/account-settings/link-base-url', {
+        method: 'PUT',
+        body: JSON.stringify({ value }),
+      }),
+    getTrackedLinkBaseUrl: () =>
+      fetchApi<{ success: boolean; data: string | null }>('/api/account-settings/tracked-link-base-url'),
+    updateTrackedLinkBaseUrl: (value: string) =>
+      fetchApi<{ success: boolean; error?: string }>('/api/account-settings/tracked-link-base-url', {
+        method: 'PUT',
+        body: JSON.stringify({ value }),
+      }),
   },
 
   // ── Round 2 APIs ─────────────────────────────────────────────────────────
@@ -432,6 +477,9 @@ export const api = {
       loginChannelId?: string | null;
       loginChannelSecret?: string | null;
       liffId?: string | null;
+      ogSiteName?: string | null;
+      ogDefaultImageUrl?: string | null;
+      ogDefaultDescription?: string | null;
     }) =>
       fetchApi<ApiResponse<LineAccount>>('/api/line-accounts', {
         method: 'POST',
@@ -460,6 +508,9 @@ export const api = {
           | 'isActive'
           | 'country'
           | 'role'
+          | 'ogSiteName'
+          | 'ogDefaultDescription'
+          | 'ogDefaultImageUrl'
         >
       >,
     ) => {
@@ -503,11 +554,24 @@ export const api = {
       fetchApi<ApiResponse<Affiliate[]>>('/api/affiliates'),
     get: (id: string) =>
       fetchApi<ApiResponse<Affiliate>>(`/api/affiliates/${id}`),
-    create: (data: { name: string; code: string; commissionRate?: number }) =>
-      fetchApi<ApiResponse<Affiliate>>('/api/affiliates', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
+    // Admin-side create. Codes are auto-generated (random) — no manual `code`
+    // needed. Pass `friendId` to bind 1:1 to a LINE friend; the response then
+    // includes an issued `link` (refCode + url) unless issueInitialLink=false.
+    // The legacy explicit `code` form still works for OSS back-compat.
+    create: (data: {
+      name?: string
+      code?: string
+      commissionRate?: number
+      friendId?: string
+      issueInitialLink?: boolean
+    }) =>
+      fetchApi<ApiResponse<Affiliate> & { link?: { refCode: string; url: string } | null }>(
+        '/api/affiliates',
+        {
+          method: 'POST',
+          body: JSON.stringify(data),
+        },
+      ),
     update: (id: string, data: Partial<Pick<Affiliate, 'name' | 'commissionRate' | 'isActive'>>) =>
       fetchApi<ApiResponse<Affiliate>>(`/api/affiliates/${id}`, {
         method: 'PUT',
@@ -519,6 +583,71 @@ export const api = {
       fetchApi<ApiResponse<{ affiliateId: string; affiliateName: string; code: string; commissionRate: number; totalClicks: number; totalConversions: number; totalRevenue: number }>>(
         `/api/affiliates/${id}/report?` + new URLSearchParams(params as Record<string, string>),
       ),
+    /** v2 report: clicks, friendAdds, conversionsByPoint, estimatedCommission, duplicateFlags */
+    reportV2: (id: string, params?: { startDate?: string; endDate?: string }) =>
+      fetchApi<ApiResponse<{
+        affiliateId: string;
+        affiliateName: string;
+        code: string;
+        commissionRate: number;
+        clicks: number;
+        linkClicks: number;
+        friendAdds: number;
+        conversions: number;
+        conversionsByPoint: Array<{ conversionPointId: string; name: string; count: number; value: number }>;
+        revenue: number;
+        estimatedCommission: number;
+        duplicateFlags: Array<{ friendId: string; identityKey: string }>;
+      }>>(`/api/affiliates/${id}/report?` + new URLSearchParams(params as Record<string, string>)),
+    /** Cursor-paginated attributed-friend journey summaries */
+    journeys: (id: string, params?: { limit?: number; beforeAt?: string; beforeId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.beforeAt) query.set('beforeAt', params.beforeAt);
+      if (params?.beforeId) query.set('beforeId', params.beforeId);
+      const qs = query.toString();
+      return fetchApi<{
+        success: boolean;
+        data: Array<{
+          friendId: string;
+          displayName: string | null;
+          addedAt: string;
+          refCode: string | null;
+          touchCount: number;
+          formCount: number;
+          conversionCount: number;
+          lastEventAt: string;
+        }>;
+        nextCursor: { beforeAt: string; beforeId: string } | null;
+      }>(`/api/affiliates/${id}/journeys${qs ? `?${qs}` : ''}`);
+    },
+    /** List ref_code links for an affiliate (loaded on detail expand) */
+    links: (id: string) =>
+      fetchApi<ApiResponse<Array<{
+        id: string;
+        affiliate_id: string;
+        ref_code: string;
+        label: string | null;
+        line_account_id: string | null;
+        is_active: number;
+        created_at: string;
+        click_count: number;
+        offer_id: string | null;
+        offer_name: string | null;
+      }>>>(`/api/affiliates/${id}/links`),
+    /** All-affiliates aggregate report (single-pass, no N+1) */
+    allReport: (params?: { startDate?: string; endDate?: string }) =>
+      fetchApi<ApiResponse<Array<{
+        affiliateId: string;
+        affiliateName: string;
+        code: string;
+        commissionRate: number;
+        totalClicks: number;
+        totalConversions: number;
+        totalRevenue: number;
+        linkCount: number;
+        friendAdds: number;
+      }>>>('/api/affiliates-report?' + new URLSearchParams(params as Record<string, string>)),
   },
   templates: {
     list: (category?: string) =>
@@ -663,12 +792,16 @@ export const api = {
       ),
   },
   chats: {
-    list: (params?: { status?: string; operatorId?: string; accountId?: string; unansweredOnly?: boolean }) => {
+    list: (params?: { status?: string; operatorId?: string; accountId?: string; unansweredOnly?: boolean; limit?: number; beforeAt?: string; beforeId?: string }) => {
       const query: Record<string, string> = {}
       if (params?.status) query.status = params.status
       if (params?.operatorId) query.operatorId = params.operatorId
       if (params?.accountId) query.lineAccountId = params.accountId
       if (params?.unansweredOnly) query.unansweredOnly = '1'
+      if (params?.limit !== undefined) query.limit = String(params.limit)
+      // カーソルページング: (lastMessageAt, friendId) の複合カーソルより古い行を返す
+      if (params?.beforeAt) query.beforeAt = params.beforeAt
+      if (params?.beforeId) query.beforeId = params.beforeId
       return fetchApi<ApiResponse<Chat[]>>(
         '/api/chats?' + new URLSearchParams(query),
       )
@@ -1165,6 +1298,30 @@ export const api = {
     funnel: (id: string) =>
       fetchApi<ApiResponse<EntryRouteFunnel>>(`/api/entry-routes/${id}/funnel`),
   },
+  // tracked_links は別管理だが /inflow-links 一覧で「(未登録)」誤表示を防ぐため
+  // 同ページから参照する。Worker の applyRefAttribution は entry_routes → tracked_links
+  // の順でフォールバックするので、tracked_links 登録済み ref は実際にはシナリオ発火している。
+  trackedLinks: {
+    list: () =>
+      fetchApi<
+        ApiResponse<
+          Array<{
+            id: string
+            name: string
+            originalUrl: string
+            trackingUrl: string
+            tagId: string | null
+            scenarioId: string | null
+            introTemplateId: string | null
+            rewardTemplateId: string | null
+            isActive: boolean
+            clickCount: number
+            createdAt: string
+            updatedAt: string
+          }>
+        >
+      >('/api/tracked-links'),
+  },
   pools: {
     list: () => fetchApi<ApiResponse<TrafficPool[]>>('/api/traffic-pools'),
     get: (id: string) => fetchApi<ApiResponse<TrafficPool>>(`/api/traffic-pools/${id}`),
@@ -1205,6 +1362,61 @@ export const api = {
           { method: 'DELETE' },
         ),
     },
+  },
+  affiliateOffers: {
+    list: (params?: { activeOnly?: boolean }) => {
+      const qs = params?.activeOnly ? '?activeOnly=true' : ''
+      return fetchApi<{ success: boolean; data: AffiliateOffer[] }>(`/api/affiliate-offers${qs}`)
+    },
+    get: (id: string) =>
+      fetchApi<{ success: boolean; data: AffiliateOffer }>(`/api/affiliate-offers/${id}`),
+    create: (data: {
+      name: string
+      description?: string | null
+      rewardAmount?: number
+      lineAccountId?: string | null
+      tagId?: string | null
+      scenarioId?: string | null
+    }) =>
+      fetchApi<{ success: boolean; data: AffiliateOffer }>('/api/affiliate-offers', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: Partial<{
+      name: string
+      description: string | null
+      rewardAmount: number
+      lineAccountId: string | null
+      tagId: string | null
+      scenarioId: string | null
+      isActive: boolean
+    }>) =>
+      fetchApi<{ success: boolean; data: AffiliateOffer }>(`/api/affiliate-offers/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+  },
+  conversionApprovals: {
+    list: (params?: { status?: 'pending' | 'approved' | 'rejected'; limit?: number; offset?: number }) => {
+      const p = new URLSearchParams()
+      if (params?.status) p.set('status', params.status)
+      if (params?.limit !== undefined) p.set('limit', String(params.limit))
+      if (params?.offset !== undefined) p.set('offset', String(params.offset))
+      const qs = p.toString()
+      return fetchApi<{ success: boolean; data: ConversionApprovalItem[] }>(
+        `/api/conversions/approvals${qs ? `?${qs}` : ''}`,
+      )
+    },
+    approve: (eventId: string) =>
+      fetchApi<{ success: boolean; data?: { id: string; approvalStatus: string }; error?: string }>(
+        `/api/conversions/events/${eventId}/approval`,
+        { method: 'PATCH', body: JSON.stringify({ status: 'approved' }) },
+      ),
+    reject: (eventId: string) =>
+      fetchApi<{ success: boolean; data?: { id: string; approvalStatus: string }; error?: string }>(
+        `/api/conversions/events/${eventId}/approval`,
+        { method: 'PATCH', body: JSON.stringify({ status: 'rejected' }) },
+      ),
   },
   duplicates: {
     stats: (options?: { forceRefresh?: boolean }) =>
@@ -1262,6 +1474,7 @@ export interface BookingMenu {
   base_price: number;
   sort_order: number;
   is_active: number;
+  auto_tag_id: string | null;
 }
 
 export interface BookingStaff {
@@ -1293,6 +1506,7 @@ export interface StaffMenuMatrix {
 
 export interface BookingRequest {
   id: string;
+  friend_id: string;
   starts_at: string;
   ends_at: string;
   status: string;
@@ -1458,6 +1672,11 @@ export interface EventDetail {
   reminder_hours_before: number | null;
   is_published: number;
   sort_order: number;
+  confirmation_message_extra: string | null;
+  reminder_message_extra: string | null;
+  og_title: string | null;
+  og_description: string | null;
+  og_image_url: string | null;
   // Multi-account fields (migration 040, broadcasts と同パターン)
   target_type?: 'single' | 'multi-account-dedup';
   // Worker は JSON 文字列で返す。UI 側で parse して string[] を扱う。

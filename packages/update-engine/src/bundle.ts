@@ -180,9 +180,11 @@ function hashContentMap(map: Map<string, Buffer>): string {
  * hashes. Throws a descriptive error on mismatch; returns `undefined` when all
  * three match.
  *
- * The worker error embeds both hex hashes so operators can quickly identify
- * whether the bundle was tampered with (e.g. CDN replaced the artifact) or
- * the manifest itself drifted.
+ * DEPRECATED for bundle downloads: `worker_hash` is the first-pass identity
+ * hash baked INTO the worker (see ReleaseEntry.worker_hash) and can never
+ * equal the byte hash of the final artifact. Use
+ * {@link verifyBundleIntegrity} instead; this remains only for callers that
+ * compare two same-pass hash sets.
  */
 export function assertHashesMatch(
   computed: BundleHashes,
@@ -197,6 +199,58 @@ export function assertHashesMatch(
     throw new Error('bundle admin hash mismatch');
   }
   if (computed.liff !== expected.liff_hash) {
+    throw new Error('bundle liff hash mismatch');
+  }
+}
+
+/**
+ * Marker error: the release predates the deployable-worker pipeline (no
+ * `worker_bundle_hash`), so its bundle cannot be deployed. Callers show a
+ * "wait for the next release / use --from-source" message on this.
+ */
+export class BundleNotDeployableError extends Error {
+  constructor(version: string) {
+    super(
+      `release v${version} has no worker_bundle_hash — its bundle predates the ` +
+        'deployable-worker release pipeline and cannot be installed or updated from',
+    );
+    this.name = 'BundleNotDeployableError';
+  }
+}
+
+/**
+ * Verify a downloaded bundle against its manifest entry.
+ *
+ * - admin / liff: byte hashes must equal the manifest values (these are
+ *   hashed AFTER their final build, so equality is exact).
+ * - worker: compared against `worker_bundle_hash`, the detached hash of the
+ *   final artifact. `worker_hash` is NOT used here — it is the first-pass
+ *   identity stamp baked into the worker, definitionally different from the
+ *   final bytes. Entries without `worker_bundle_hash` are rejected with
+ *   {@link BundleNotDeployableError}: those bundles shipped a broken
+ *   re-export stub as worker/index.js and must not be deployed.
+ */
+export function verifyBundleIntegrity(
+  computed: BundleHashes,
+  entry: {
+    version: string;
+    admin_hash: string;
+    liff_hash: string;
+    worker_bundle_hash?: string;
+  },
+): void {
+  if (!entry.worker_bundle_hash) {
+    throw new BundleNotDeployableError(entry.version);
+  }
+  if (computed.worker !== entry.worker_bundle_hash) {
+    throw new Error(
+      `bundle worker hash mismatch (tampered? ${computed.worker} vs ${entry.worker_bundle_hash})`,
+    );
+  }
+  if (computed.admin !== entry.admin_hash) {
+    throw new Error('bundle admin hash mismatch');
+  }
+  if (computed.liff !== entry.liff_hash) {
     throw new Error('bundle liff hash mismatch');
   }
 }

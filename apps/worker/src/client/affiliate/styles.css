@@ -1,0 +1,216 @@
+/* affiliate 専用 CSS。salon-booking / event-booking と同じパターン。
+ * Tailwind v4: theme + utilities を取り込み、preflight (base reset) は除外。
+ * preflight を含めると既存 form.ts / Calendar booking 用 inline CSS と衝突する
+ * ため、affiliate namespace (body.af-active 配下) にだけ手動 reset を当てる。
+ */
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
+
+/* ─── affiliate namespace の inline 上書き ─────────────
+ * index.html の friend-add 用 inline:
+ *   body { display:flex; align-items:center; min-height:100vh }
+ *   #app  { max-width:480px; padding:24px 16px; width:100% }
+ * は React アプリでは邪魔なので body と #app 双方を上書き。
+ */
+body.af-active {
+  display: block !important;
+  align-items: stretch !important;
+}
+body.af-active #app {
+  max-width: none !important;
+  padding: 0 !important;
+  width: 100% !important;
+}
+
+/* ─── 必要最低限の preflight ────────────────────────────────
+ * 全ルールは :where(body.af-active) で wrap して specificity を実質 0 にする。
+ * salon-booking の解説参照: utility クラスが常に勝つようにするため。
+ */
+:where(body.af-active),
+:where(body.af-active) *,
+:where(body.af-active) *::before,
+:where(body.af-active) *::after {
+  box-sizing: border-box;
+}
+:where(body.af-active) h1,
+:where(body.af-active) h2,
+:where(body.af-active) h3,
+:where(body.af-active) h4,
+:where(body.af-active) h5,
+:where(body.af-active) h6 {
+  font-size: inherit;
+  font-weight: inherit;
+  margin: 0;
+}
+:where(body.af-active) p,
+:where(body.af-active) dl,
+:where(body.af-active) dd,
+:where(body.af-active) dt,
+:where(body.af-active) ol,
+:where(body.af-active) ul,
+:where(body.af-active) figure,
+:where(body.af-active) blockquote {
+  margin: 0;
+}
+:where(body.af-active) ol,
+:where(body.af-active) ul {
+  list-style: none;
+  padding: 0;
+}
+:where(body.af-active) button {
+  font-family: inherit;
+  font-size: 100%;
+  font-weight: inherit;
+  line-height: inherit;
+  color: inherit;
+  margin: 0;
+  padding: 0;
+  background-color: transparent;
+  background-image: none;
+  border: 0;
+  cursor: pointer;
+}
+:where(body.af-active) button:disabled {
+  cursor: not-allowed;
+}
+:where(body.af-active) input,
+:where(body.af-active) textarea,
+:where(body.af-active) select {
+  font-family: inherit;
+  font-size: 100%;
+  line-height: inherit;
+  color: inherit;
+  margin: 0;
+}
+:where(body.af-active) img,
+:where(body.af-active) svg,
+:where(body.af-active) video,
+:where(body.af-active) canvas {
+  display: block;
+  max-width: 100%;
+}
+:where(body.af-active) a {
+  color: inherit;
+  text-decoration: inherit;
+}
+
+/* ─── デザイントークン (salon-booking と統一) ─────────────
+ * salon-booking の sb-* 言語をそのまま af-* に写経する。色・角丸・影・
+ * ボタン・バッジの流儀を一致させ、予約フォームと同じ見た目にする。
+ */
+
+/* LINE 緑テーマ */
+.af-line-green { background-color: #06C755; }
+.af-line-green-text { color: #06C755; }
+
+/* fade-in / slide-up アニメーション (salon-booking と同じ言語) */
+@keyframes af-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.af-fade-in { animation: af-fade-in 0.25s ease both; }
+
+@keyframes af-slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.af-slide-up { animation: af-slide-up 0.3s ease both; }
+
+/* spinner */
+@keyframes af-spin { to { transform: rotate(360deg); } }
+.af-spinner {
+  width: 32px; height: 32px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #06C755;
+  border-radius: 9999px;
+  animation: af-spin 0.8s linear infinite;
+}
+
+/* セクションカード (sb-card と同一) */
+.af-card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 18px 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.06);
+}
+
+/* ステータスバッジ (sb-badge と同一) */
+.af-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* プライマリ CTA (LINE 緑、salon-booking の予約ボタンと同じ流儀) */
+.af-primary-btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  background: #06C755;
+  box-shadow: 0 1px 3px rgba(6, 199, 85, 0.3);
+  transition: transform 0.1s, background-color 0.15s, opacity 0.15s;
+}
+.af-primary-btn:active { transform: scale(0.98); }
+.af-primary-btn:disabled { opacity: 0.5; }
+
+/* セカンダリ CTA (この案件用のリンクを追加 等、緑の輪郭ボタン) */
+.af-secondary-btn {
+  width: 100%;
+  padding: 10px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 13px;
+  background: #ecfdf5;
+  color: #06C755;
+  border: 1.5px solid #06C755;
+  transition: transform 0.1s, background-color 0.15s, color 0.15s;
+}
+.af-secondary-btn:active {
+  transform: scale(0.98);
+  background-color: #06C755;
+  color: #fff;
+}
+.af-secondary-btn:disabled { opacity: 0.5; }
+
+/* コピー用の淡いボタン */
+.af-copy-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #06C755;
+  background: #ecfdf5;
+  padding: 6px 12px;
+  border-radius: 9999px;
+  transition: background-color 0.15s;
+}
+.af-copy-btn:active { background: #d1fae5; }
+
+/* テキスト入力 (フォーカス時は LINE 緑リング) */
+.af-input {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: #111827;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.af-input:focus {
+  outline: none;
+  border-color: #06C755;
+  box-shadow: 0 0 0 3px rgba(6, 199, 85, 0.15);
+}
+
+/* リンク行 (カード内のネストされたリンク) */
+.af-link-row {
+  border: 1px solid #f0f0f0;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fafafa;
+}

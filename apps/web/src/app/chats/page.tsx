@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { parseStickerMessageContent, stickerFallback } from '@line-crm/shared'
 import { api, fetchApi } from '@/lib/api'
+import { UNANSWERED_REFRESH_EVENT } from '@/lib/events'
 import { useAccount } from '@/contexts/account-context'
 import Header from '@/components/layout/header'
 import CcPromptButton from '@/components/cc-prompt-button'
@@ -31,9 +32,6 @@ interface ChatMessage {
   direction: 'incoming' | 'outgoing'
   messageType: string
   content: string
-  senderStaffId?: string | null
-  senderName?: string | null
-  senderIconUrl?: string | null
   createdAt: string
 }
 
@@ -42,17 +40,6 @@ interface ChatDetail extends Chat {
   friendPictureUrl: string | null
   messages?: ChatMessage[]
 }
-
-interface StaffInfo {
-  id: string
-  name: string
-  role: string
-  iconUrl: string | null
-  isActive?: boolean
-}
-
-type SenderMode = 'official' | 'self' | string // string = staff id for owner selecting others
-type SenderRequest = { senderMode: 'official' | 'self' } | { senderStaffId: string }
 
 type StatusFilter = 'all' | 'unread' | 'in_progress' | 'resolved'
 
@@ -70,6 +57,8 @@ const statusFilters: { key: StatusFilter; label: string }[] = [
 ]
 
 const SHOW_LOADING_PREF_KEY = 'lh_chat_show_loading_indicator'
+// 一覧の1ページ件数。worker 側 /api/chats のデフォルト LIMIT と揃える。
+const CHAT_PAGE_SIZE = 300
 const LOADING_SECONDS_PREF_KEY = 'lh_chat_loading_seconds'
 const LOADING_REFRESH_INTERVAL_MS = 4000
 
@@ -183,11 +172,9 @@ function DirectMessagePanel({ friendId, friend, onBack, onSent }: {
     sendLockRef.current = true
     setSending(true)
     try {
-      const meRes = await api.staff.me().catch(() => null)
-      const sender = meRes?.success && meRes.data.name ? { senderMode: 'self' as const } : undefined
       await fetchApi(`/api/friends/${friendId}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ content: message, messageType: 'text', ...(sender ?? {}) }),
+        body: JSON.stringify({ content: message, messageType: 'text' }),
       })
       setMessages((prev) => [...prev, {
         id: crypto.randomUUID(),
@@ -335,6 +322,8 @@ export default function ChatsPage() {
   // Send mode: 'enter' = Enter sends, Shift+Enter = newline; 'shift-enter' = reverse
   const [sendMode, setSendMode] = useState<'enter' | 'shift-enter'>('enter')
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMoreChats, setHasMoreChats] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState('')
   const [messageContent, setMessageContent] = useState('')
@@ -350,9 +339,6 @@ export default function ChatsPage() {
   const isComposingRef = useRef(false)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const [currentStaff, setCurrentStaff] = useState<StaffInfo | null>(null)
-  const [staffList, setStaffList] = useState<StaffInfo[]>([])
-  const [senderMode, setSenderMode] = useState<SenderMode>('self')
 
   useEffect(() => {
     try {
@@ -377,42 +363,75 @@ export default function ChatsPage() {
     }
   }, [showLoadingIndicator, loadingSeconds])
 
-  useEffect(() => {
-    const loadStaffInfo = async () => {
-      try {
-        const meRes = await api.staff.me()
-        if (meRes.success) {
-          setCurrentStaff(meRes.data as StaffInfo)
-          if (meRes.data.role === 'owner') {
-            try {
-              const listRes = await api.staff.list()
-              if (listRes.success) setStaffList(listRes.data as unknown as StaffInfo[])
-            } catch { /* staff list is optional */ }
-          }
-        }
-      } catch { /* not logged in as staff */ }
+  // ページング用カーソル。表示リストは楽観更新で並び替わるため、
+  // 「サーバから最後に受け取った行」を ref で保持して次ページの起点にする
+  // (offset 方式だと新着で行が押し下げられた分が欠落する)。
+  const nextCursorRef = useRef<{ at: string; id: string } | null>(null)
+
+  const buildListParams = useCallback((cursor: { at: string; id: string } | null) => {
+    const params: {
+      status?: string; accountId?: string; unansweredOnly?: boolean;
+      limit?: number; beforeAt?: string; beforeId?: string;
+    } = {}
+    if (statusFilter !== 'all' && !unansweredOnly) params.status = statusFilter
+    if (selectedAccountId) params.accountId = selectedAccountId
+    if (unansweredOnly) params.unansweredOnly = true
+    else params.limit = CHAT_PAGE_SIZE
+    if (cursor) {
+      params.beforeAt = cursor.at
+      params.beforeId = cursor.id
     }
-    loadStaffInfo()
-  }, [])
+    return params
+  }, [statusFilter, selectedAccountId, unansweredOnly])
 
   const loadChats = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const params: { status?: string; accountId?: string; unansweredOnly?: boolean } = {}
-      if (statusFilter !== 'all' && !unansweredOnly) params.status = statusFilter
-      if (selectedAccountId) params.accountId = selectedAccountId
-      if (unansweredOnly) params.unansweredOnly = true
-      const chatRes = await api.chats.list(params)
+      const chatRes = await api.chats.list(buildListParams(null))
       if (chatRes.success) {
-        setChats(chatRes.data as unknown as Chat[])
+        const rows = chatRes.data as unknown as Chat[]
+        setChats(rows)
+        const last = rows[rows.length - 1]
+        nextCursorRef.current = last?.lastMessageAt ? { at: last.lastMessageAt, id: last.id } : null
+        // ページ丁度いっぱい返ってきた = 続きがある可能性が高い (unansweredOnly は全件返る)
+        setHasMoreChats(!unansweredOnly && rows.length === CHAT_PAGE_SIZE)
       }
     } catch {
       setError('チャットの読み込みに失敗しました。もう一度お試しください。')
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, selectedAccountId, unansweredOnly])
+  }, [buildListParams, unansweredOnly])
+
+  // 「さらに読み込む」— サーバ由来カーソルの続きを取得して末尾に追加する。
+  // 楽観更新との競合に備えて既存 id は除外し、重複表示を防ぐ。
+  const loadMoreChats = useCallback(async () => {
+    if (loadingMore) return
+    const cursor = nextCursorRef.current
+    if (!cursor) {
+      setHasMoreChats(false)
+      return
+    }
+    setLoadingMore(true)
+    try {
+      const chatRes = await api.chats.list(buildListParams(cursor))
+      if (chatRes.success) {
+        const rows = chatRes.data as unknown as Chat[]
+        setChats((prev) => {
+          const seen = new Set(prev.map((c) => c.id))
+          return [...prev, ...rows.filter((r) => !seen.has(r.id))]
+        })
+        const last = rows[rows.length - 1]
+        nextCursorRef.current = last?.lastMessageAt ? { at: last.lastMessageAt, id: last.id } : null
+        setHasMoreChats(rows.length === CHAT_PAGE_SIZE)
+      }
+    } catch {
+      setError('チャットの追加読み込みに失敗しました。')
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [loadingMore, buildListParams])
 
   // Friends list (for the "new direct message" modal) — loaded lazily in the background
   // Previously fetched 800 friends in parallel with chats, which blocked the initial render.
@@ -583,31 +602,6 @@ export default function ChatsPage() {
     }
   }, [showLoadingIndicator, loadingSeconds])
 
-  const buildSender = useCallback((): SenderRequest | undefined => {
-    if (senderMode === 'official') return { senderMode: 'official' }
-    if (senderMode === 'self' && currentStaff) {
-      return { senderMode: 'self' }
-    }
-    // owner selecting a specific staff member
-    const selected = staffList.find((s) => s.id === senderMode)
-    if (selected) {
-      return { senderStaffId: selected.id }
-    }
-    return undefined
-  }, [senderMode, currentStaff, staffList])
-
-  const buildOptimisticSender = useCallback((): Pick<ChatMessage, 'senderStaffId' | 'senderName' | 'senderIconUrl'> => {
-    if (senderMode === 'official') return { senderStaffId: null, senderName: null, senderIconUrl: null }
-    if (senderMode === 'self' && currentStaff) {
-      return { senderStaffId: currentStaff.id, senderName: currentStaff.name, senderIconUrl: currentStaff.iconUrl }
-    }
-    const selected = staffList.find((s) => s.id === senderMode)
-    if (selected) {
-      return { senderStaffId: selected.id, senderName: selected.name, senderIconUrl: selected.iconUrl }
-    }
-    return { senderStaffId: null, senderName: null, senderIconUrl: null }
-  }, [senderMode, currentStaff, staffList])
-
   const handleSendMessage = async () => {
     if (!selectedChatId || sending || sendLockRef.current) return
     if (!messageContent.trim() && !pendingImage) return
@@ -616,15 +610,13 @@ export default function ChatsPage() {
     setSending(true)
     try {
       const now = new Date().toISOString()
-      const sender = buildSender()
-      const optimisticSender = buildOptimisticSender()
       // --- Image send path (runs first when image is present) ---
       if (pendingImage && pendingImage.mode === 'line-image') {
         const imgPayload = JSON.stringify({
           originalContentUrl: pendingImage.originalContentUrl,
           previewImageUrl: pendingImage.previewImageUrl,
         })
-        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload, ...(sender ?? {}) })
+        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload })
         setPendingImage(null)
         // Optimistic update for image
         setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
@@ -638,7 +630,6 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'image',
               content: imgPayload,
-              ...optimisticSender,
               createdAt: now,
             },
           ],
@@ -656,7 +647,11 @@ export default function ChatsPage() {
             lastMessageDirection: 'outgoing' as const,
             lastMessageType: 'image' as const,
           } : c)
-          let filtered = currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter)
+          // 未対応モード時は status filter を skip (worker 側で status を絞ってないため
+          // 楽観更新で applied するとリストが歪む — Codex Round 1)
+          let filtered = currentUnansweredOnly
+            ? updated
+            : (currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter))
           if (currentUnansweredOnly) {
             // 未対応モードでは、自分が返信したばかりの chat はもう未対応ではないのでリストから除外
             filtered = filtered.filter((c) => c.id !== sendingChatId)
@@ -671,7 +666,7 @@ export default function ChatsPage() {
       // --- Text send path (runs independently — both paths execute when both image and text are present) ---
       if (messageContent.trim()) {
         const content = messageContent.trim()
-        await api.chats.send(sendingChatId, { content, ...(sender ?? {}) })
+        await api.chats.send(sendingChatId, { content })
         setMessageContent('')
         // Optimistic update: append message locally instead of refetching (prevents scroll jump / full reload feel)
         // Only mutate chatDetail if it still corresponds to the chat we just sent to
@@ -686,7 +681,6 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'text',
               content,
-              ...optimisticSender,
               createdAt: now,
             },
           ],
@@ -709,7 +703,11 @@ export default function ChatsPage() {
             lastMessageType: 'text' as const,
           } : c)
           // Drop rows that no longer match the current tab (e.g. replying from 未読 moves chat to in_progress)
-          let filtered = currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter)
+          // 未対応モード時は status filter を skip (worker 側で status を絞ってないため
+          // 楽観更新で applied するとリストが歪む — Codex Round 1)
+          let filtered = currentUnansweredOnly
+            ? updated
+            : (currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter))
           if (currentUnansweredOnly) {
             // 未対応モードでは、自分が返信したばかりの chat はもう未対応ではないのでリストから除外
             filtered = filtered.filter((c) => c.id !== sendingChatId)
@@ -721,6 +719,8 @@ export default function ChatsPage() {
           })
         })
       }
+      // 手動返信で未対応が 1 件減るので、サイドバーのバッジを即時更新させる
+      window.dispatchEvent(new Event(UNANSWERED_REFRESH_EVENT))
     } catch {
       setError('メッセージの送信に失敗しました。')
     } finally {
@@ -735,6 +735,8 @@ export default function ChatsPage() {
       await api.chats.update(selectedChatId, { status: newStatus })
       loadChatDetail(selectedChatId)
       loadChats()
+      // 解決済/未読の切替は未対応バッジに影響するので即時更新させる
+      window.dispatchEvent(new Event(UNANSWERED_REFRESH_EVENT))
     } catch {
       setError('ステータスの更新に失敗しました。')
     }
@@ -891,6 +893,15 @@ export default function ChatsPage() {
                     </button>
                   )
                 })}
+                {hasMoreChats && !unansweredOnly && (
+                  <button
+                    onClick={() => { void loadMoreChats() }}
+                    disabled={loadingMore}
+                    className="w-full px-4 py-3 text-sm text-green-700 hover:bg-green-50 disabled:opacity-50 border-b border-gray-100"
+                  >
+                    {loadingMore ? '読み込み中...' : 'さらに読み込む'}
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -948,8 +959,10 @@ export default function ChatsPage() {
                       type="button"
                       onClick={() => {
                         const idx = chats.findIndex((c) => c.id === selectedChatId)
-                        if (idx < 0) return
-                        const next = chats[(idx + 1) % chats.length]
+                        // idx < 0 = current chat is no longer in the list (e.g. just sent a reply)
+                        // → fall back to the head of the list so the queue keeps moving
+                        const nextIdx = idx < 0 ? 0 : (idx + 1) % chats.length
+                        const next = chats[nextIdx]
                         if (next && next.id !== selectedChatId) {
                           setSelectedChatId(next.id)
                         }
@@ -1044,14 +1057,6 @@ export default function ChatsPage() {
                           )}
 
                           <div className={`flex flex-col ${isOutgoing ? 'items-end' : 'items-start'}`}>
-                            {isOutgoing && msg.senderName && (
-                              <div className="mb-1 flex items-center gap-1.5 text-[11px] text-white/70">
-                                {msg.senderIconUrl && (
-                                  <img src={msg.senderIconUrl} alt="" className="w-4 h-4 rounded-full object-cover" />
-                                )}
-                                <span>{msg.senderName}</span>
-                              </div>
-                            )}
                             {/* メッセージバブル */}
                             <div
                               className={`max-w-[320px] px-3 py-2 text-sm break-words whitespace-pre-wrap ${
@@ -1098,33 +1103,6 @@ export default function ChatsPage() {
               {/* Send Message Form */}
               <div className="px-4 py-3 border-t border-gray-200">
                 <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-600">
-                  {currentStaff && (
-                    <div className="inline-flex items-center gap-1.5">
-                      <span className="text-gray-500">送信者:</span>
-                      {currentStaff.role === 'owner' && staffList.length > 0 ? (
-                        <select
-                          value={senderMode}
-                          onChange={(e) => setSenderMode(e.target.value)}
-                          className="border border-gray-300 rounded-md px-2 py-1 bg-white text-xs"
-                        >
-                          <option value="official">公式アカウント</option>
-                          <option value="self">{currentStaff.name}（自分）</option>
-                          {staffList.filter((s) => s.id !== currentStaff.id && s.isActive !== false).map((s) => (
-                            <option key={s.id} value={s.id}>{s.name}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <select
-                          value={senderMode}
-                          onChange={(e) => setSenderMode(e.target.value)}
-                          className="border border-gray-300 rounded-md px-2 py-1 bg-white text-xs"
-                        >
-                          <option value="official">公式アカウント</option>
-                          <option value="self">{currentStaff.name}（自分）</option>
-                        </select>
-                      )}
-                    </div>
-                  )}
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"

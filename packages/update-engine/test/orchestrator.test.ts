@@ -160,6 +160,9 @@ const sampleRelease = (
   version: '0.8.0',
   released_at: '2026-05-01T00:00:00Z',
   worker_hash: fixture.workerHash,
+  // In fixtures the identity hash and the final-artifact byte hash coincide
+  // (no two-pass rebuild); real manifests carry distinct values.
+  worker_bundle_hash: fixture.workerHash,
   admin_hash: fixture.adminHash,
   liff_hash: fixture.liffHash,
   bundle_url: BUNDLE_URL,
@@ -644,13 +647,13 @@ describe('runUpdate orchestrator', () => {
     expect(row.error).toMatch(/rollback:/);
   });
 
-  it('bundle hash mismatch (tampered) → throws via assertHashesMatch, rollback runs', async () => {
-    // Build a release with WRONG hashes — assertHashesMatch should reject.
+  it('bundle hash mismatch (tampered) → throws via verifyBundleIntegrity, rollback runs', async () => {
+    // Build a release with a WRONG byte hash — verifyBundleIntegrity should reject.
     globalThis.fetch = makeFetch(fixture) as unknown as typeof fetch;
 
     const ctx = sampleCtx(fixture, {
       target: sampleRelease(fixture, {
-        worker_hash: 'sha256:tampered',
+        worker_bundle_hash: 'sha256:tampered',
       }),
     });
 

@@ -31,29 +31,54 @@ export async function processBroadcastSend(
     throw new Error(`Broadcast ${broadcastId} not found`);
   }
 
+  // multi-account-dedup は inline 送信せず cron queue (processQueuedBroadcasts) に委譲する。
+  // この関数は scheduled / 即時の単一 account 経路用で、毎回 auto-track を実行する。dedup を
+  // ここで送ると (1) auto-track がここと queue 側で二重実行されて tracked link が重複し、
+  // (2) 分割送信 (chunking) の継続が queue 側にあるため partial-sent のまま sent 扱いになる。
+  // よって total_count だけ確定して status='sending', batch_offset=0 にし、queue に渡す。
+  // total_count は executor が inactive を skip するのに合わせ、active アカウントの当選者数で
+  // 計算する (routes 即時送信パスと同じロジック)。
+  if (broadcast.target_type === 'multi-account-dedup') {
+    const { computeDedupBroadcastPreview } = await import('./dedup-broadcast.js');
+    const accountIds = (broadcast.account_ids ? JSON.parse(broadcast.account_ids) : []) as string[];
+    const dedupPriority = (broadcast.dedup_priority ? JSON.parse(broadcast.dedup_priority) : []) as string[];
+    const preview = await computeDedupBroadcastPreview(db, accountIds, dedupPriority, broadcast.target_tag_id ?? null);
+    let projectedTotal = 0;
+    const { getLineAccountById } = await import('@line-crm/db');
+    for (const a of preview.perAccount) {
+      const account = await getLineAccountById(db, a.accountId);
+      if (account && account.is_active) projectedTotal += a.recipients.length;
+    }
+    await db
+      .prepare(`UPDATE broadcasts SET status = 'sending', batch_offset = 0, total_count = ? WHERE id = ?`)
+      .bind(projectedTotal, broadcast.id)
+      .run();
+    return (await getBroadcastById(db, broadcastId))!;
+  }
+
   // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
+  // track_links=0 の broadcast は明示的に短縮 OFF (URL をそのまま送る)。
+  const broadcastAccountId = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
   let finalType: string = broadcast.message_type;
   let finalContent = broadcast.message_content;
-  if (workerUrl) {
+  if (workerUrl && broadcast.track_links !== 0) {
     const { autoTrackContent } = await import('./auto-track.js');
-    const tracked = await autoTrackContent(db, broadcast.message_type, broadcast.message_content, workerUrl);
+    const tracked = await autoTrackContent(db, broadcast.message_type, broadcast.message_content, workerUrl, {
+      lineAccountId: broadcastAccountId,
+    });
     finalType = tracked.messageType;
     finalContent = tracked.content;
   }
   // {{liff_id}} 置換: broadcast の line_account_id に紐付く LIFF ID で替える。
-  // multi-account-dedup は dedup-broadcast.ts 側で per-account 置換するので
-  // ここは scheduled / tag / segment / all 系の単一 account 経路のみ。
-  // multi-account-dedup の sentinel account を踏むと placeholder が消えて
-  // dedup ループ側で {{liff_id}} を見失うので、ここでは置換しない。
-  if (broadcast.target_type !== 'multi-account-dedup') {
-    const broadcastAccountId = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
-    if (broadcastAccountId) {
-      const { getLineAccountById: getLA } = await import('@line-crm/db');
-      const acct = await getLA(db, broadcastAccountId);
-      const liffId = (acct as unknown as { liff_id?: string | null } | null)?.liff_id ?? null;
-      const { renderMessageContent } = await import('./render-message.js');
-      finalContent = renderMessageContent(finalContent, liffId);
-    }
+  // ここは tag / all 系の単一 account 経路のみ (multi-account-dedup は冒頭で queue に
+  // 委譲済みで到達しない。dedup の {{liff_id}} 置換は dedup-broadcast.ts 側で per-account
+  // に行う)。
+  if (broadcastAccountId) {
+    const { getLineAccountById: getLA } = await import('@line-crm/db');
+    const acct = await getLA(db, broadcastAccountId);
+    const liffId = (acct as unknown as { liff_id?: string | null } | null)?.liff_id ?? null;
+    const { renderMessageContent } = await import('./render-message.js');
+    finalContent = renderMessageContent(finalContent, liffId);
   }
   const altText = (broadcast as unknown as Record<string, unknown>).alt_text as string | undefined;
   const message = buildMessage(finalType, finalContent, altText || undefined);
@@ -119,18 +144,8 @@ export async function processBroadcastSend(
         }
       }
       await updateBroadcastLineRequestId(db, broadcast.id, null, unit);
-    } else if (broadcast.target_type === 'multi-account-dedup') {
-      // Always queued via routes/broadcasts.ts、ただし scheduled 経由でも
-      // processBroadcastSend に到達するため両方カバーが必要。dedup 内部で
-      // per-account に {{liff_id}} 置換 + buildMessage するが、auto-track
-      // 結果 (finalType / finalContent) を反映した broadcast を渡さないと
-      // tracked Flex 変換が落ちる。
-      const { processMultiAccountDedupBroadcast } = await import('./dedup-broadcast.js');
-      const broadcastForDedup = { ...broadcast, message_type: finalType, message_content: finalContent };
-      const result = await processMultiAccountDedupBroadcast(db, broadcastForDedup);
-      totalCount = result.totalCount;
-      successCount = result.successCount;
     }
+    // multi-account-dedup はこの関数の冒頭で queue に委譲済み (ここには到達しない)。
 
     await createBroadcastInsight(db, broadcast.id);
     await updateBroadcastStatus(db, broadcastId, 'sent', { totalCount, successCount });
@@ -248,12 +263,23 @@ async function processQueuedBroadcastBatches(
     return;
   }
 
-  // auto-track（初回バッチのみ、offsetが0のとき）
+  // auto-track（初回のみ）。auto-track は冪等でない (呼ぶたび新 tracked link を作る) ため
+  // 「1 broadcast につき 1 回」に厳密化する。non-dedup は batch_offset が 0→N と進むので
+  // `batchOffset === 0` が初回判定になる。dedup は分割送信で毎 tick batch_offset=0 から
+  // 再入するため、それだけだと毎 tick auto-track が走って tracked link が二重生成される。
+  // dedup の初回は dedup_progress=NULL なので、その条件を足して継続 tick では再実行しない
+  // (初回に変換結果を message_content へ persist 済みなので、継続 tick はそれを使う)。
+  const isDedupContinuation =
+    broadcast.target_type === 'multi-account-dedup' && !!broadcast.dedup_progress;
   let finalType: string = broadcast.message_type;
   let finalContent = broadcast.message_content;
-  if (workerUrl && batchOffset === 0) {
+  if (workerUrl && batchOffset === 0 && !isDedupContinuation && broadcast.track_links !== 0) {
     const { autoTrackContent } = await import('./auto-track.js');
-    const tracked = await autoTrackContent(db, broadcast.message_type, broadcast.message_content, workerUrl);
+    // dedup broadcast は複数アカウントから送るためリンクの所有アカウントを一意に
+    // 決められない → line_account_id は null のまま (env.LIFF_URL フォールバック)。
+    const tracked = await autoTrackContent(db, broadcast.message_type, broadcast.message_content, workerUrl, {
+      lineAccountId: (raw.line_account_id as string | null) ?? null,
+    });
     finalType = tracked.messageType;
     finalContent = tracked.content;
     // 変換後のコンテンツを保存（次バッチ以降で使えるように）
@@ -284,6 +310,15 @@ async function processQueuedBroadcastBatches(
     const { processMultiAccountDedupBroadcast } = await import('./dedup-broadcast.js');
     const broadcastForDedup = { ...broadcast, message_type: finalType, message_content: finalContent };
     const result = await processMultiAccountDedupBroadcast(db, broadcastForDedup);
+    if (!result.complete) {
+      // 時間バジェットに達して途中で yield した。status='sending' のまま batch_offset を
+      // -1(ロック) → 0 に戻し、次の cron tick が getQueuedBroadcasts で拾って続きを送る。
+      // 進捗 (dedup_progress / success_count) は batch ごとに永続化済みなので、
+      // success_count は加算しない (第4引数 0)。これで 5000 人配信でも 1 実行が短く終わり、
+      // Worker 時間制限に当たって stall することが無くなる (= 分割送信)。
+      await updateBroadcastBatchProgress(db, broadcast.id, 0, 0);
+      return;
+    }
     await createBroadcastInsight(db, broadcast.id);
     await updateBroadcastStatus(db, broadcast.id, 'sent', {
       totalCount: result.totalCount,

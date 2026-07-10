@@ -136,7 +136,22 @@ export default function FriendListRow({ friend, onTagEditClick }: Props) {
             {friend.refCode}
           </p>
         )}
-        {friend.tags.length === 0 && !friend.firstTrackedLinkName && !friend.refCode && (
+        {/* IG account attribution (written by IG Harness cross-link, first touch) */}
+        {(() => {
+          const meta = (friend as unknown as { metadata?: Record<string, unknown> }).metadata
+          const igUsername = meta?.ig_account_username as string | undefined
+          const igAccountId = meta?.ig_account_id as string | undefined
+          if (!igUsername && !igAccountId) return null
+          return (
+            <p className="text-[10px] text-pink-600">
+              <span className="text-gray-400">IG流入：</span>
+              {igUsername ? `@${igUsername}` : igAccountId}
+            </p>
+          )
+        })()}
+        {friend.tags.length === 0 && !friend.firstTrackedLinkName && !friend.refCode &&
+          !(friend as unknown as { metadata?: Record<string, unknown> }).metadata?.ig_account_username &&
+          !(friend as unknown as { metadata?: Record<string, unknown> }).metadata?.ig_account_id && (
           <span className="text-[10px] text-gray-300">—</span>
         )}
         {onTagEditClick && (

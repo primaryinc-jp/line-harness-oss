@@ -71,12 +71,37 @@ CREATE TABLE affiliate_clicks (
   created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE affiliate_links (
+  id              TEXT PRIMARY KEY,
+  affiliate_id    TEXT NOT NULL REFERENCES affiliates (id),
+  ref_code        TEXT NOT NULL UNIQUE,
+  label           TEXT,
+  line_account_id TEXT REFERENCES line_accounts (id),
+  offer_id        TEXT REFERENCES affiliate_offers (id),
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL,
+  click_count     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE affiliate_offers (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  description     TEXT,
+  reward_amount   INTEGER NOT NULL DEFAULT 0,
+  line_account_id TEXT REFERENCES line_accounts (id),
+  tag_id          TEXT REFERENCES tags (id),
+  scenario_id     TEXT REFERENCES scenarios (id),
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL
+);
+
 CREATE TABLE affiliates (
   id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
   code            TEXT NOT NULL UNIQUE,
   commission_rate REAL NOT NULL DEFAULT 0,
   is_active       INTEGER NOT NULL DEFAULT 1,
+  friend_id       TEXT REFERENCES friends (id),
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
@@ -201,7 +226,7 @@ CREATE TABLE "broadcasts" (
   account_ids        TEXT CHECK (account_ids IS NULL OR json_valid(account_ids)),
   dedup_priority     TEXT CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)),
   failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids))
-, dedup_progress TEXT, batch_lock_at TEXT);
+, dedup_progress TEXT, batch_lock_at TEXT, track_links INTEGER NOT NULL DEFAULT 1);
 
 CREATE TABLE calendar_bookings (
   id             TEXT PRIMARY KEY,
@@ -229,13 +254,17 @@ CREATE TABLE chats (
 , line_account_id TEXT);
 
 CREATE TABLE conversion_events (
-  id                  TEXT PRIMARY KEY,
-  conversion_point_id TEXT NOT NULL REFERENCES conversion_points (id) ON DELETE CASCADE,
-  friend_id           TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
-  user_id             TEXT,
-  affiliate_code      TEXT,
-  metadata            TEXT,
-  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+  id                   TEXT PRIMARY KEY,
+  conversion_point_id  TEXT NOT NULL REFERENCES conversion_points (id) ON DELETE CASCADE,
+  friend_id            TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
+  user_id              TEXT,
+  affiliate_code       TEXT,
+  metadata             TEXT,
+  affiliate_id         TEXT REFERENCES affiliates (id),
+  attributed_ref_code  TEXT,
+  approval_status      TEXT CHECK (approval_status IN ('pending','approved','rejected')),
+  approved_at          TEXT,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
 CREATE TABLE conversion_points (
@@ -428,6 +457,8 @@ CREATE TABLE friends (
   user_id          TEXT,
   ig_igsid         TEXT,
   score            INTEGER NOT NULL DEFAULT 0,
+  last_ref_code    TEXT,
+  last_ref_at      TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 , ref_code TEXT, metadata TEXT NOT NULL DEFAULT '{}', line_account_id TEXT REFERENCES line_accounts(id), first_tracked_link_id TEXT REFERENCES tracked_links (id) ON DELETE SET NULL);
@@ -455,18 +486,36 @@ CREATE TABLE incoming_webhooks (
 );
 
 CREATE TABLE line_accounts (
-  id                   TEXT PRIMARY KEY,
-  channel_id           TEXT NOT NULL UNIQUE,
-  name                 TEXT NOT NULL,
-  channel_access_token TEXT NOT NULL,
-  channel_secret       TEXT NOT NULL,
-  is_active            INTEGER NOT NULL DEFAULT 1,
-  country              TEXT,
-  role                 TEXT,
-  display_order        INTEGER NOT NULL DEFAULT 0,
-  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
-, login_channel_id TEXT, login_channel_secret TEXT, liff_id TEXT, token_expires_at TEXT, og_site_name TEXT, og_default_image_url TEXT, og_default_description TEXT);
+  id                     TEXT PRIMARY KEY,
+  channel_id             TEXT NOT NULL UNIQUE,
+  name                   TEXT NOT NULL,
+  channel_access_token   TEXT NOT NULL,
+  channel_secret         TEXT NOT NULL,
+  is_active              INTEGER NOT NULL DEFAULT 1,
+  country                TEXT,
+  role                   TEXT,
+  display_order          INTEGER NOT NULL DEFAULT 0,
+  og_site_name           TEXT,
+  og_default_image_url   TEXT,
+  og_default_description TEXT,
+  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+, login_channel_id TEXT, login_channel_secret TEXT, liff_id TEXT, token_expires_at TEXT);
+
+CREATE TABLE line_targets (
+  id               TEXT PRIMARY KEY,
+  target_type      TEXT NOT NULL CHECK (target_type IN ('group', 'room')),
+  line_target_id   TEXT UNIQUE NOT NULL,
+  display_name     TEXT,
+  picture_url      TEXT,
+  is_active        INTEGER NOT NULL DEFAULT 1,
+  line_account_id  TEXT,
+  metadata         TEXT,
+  last_message_at  TEXT,
+  membership_updated_at INTEGER,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
 
 CREATE TABLE link_clicks (
   id TEXT PRIMARY KEY,
@@ -487,9 +536,11 @@ CREATE TABLE menus (
   sort_order            INTEGER NOT NULL DEFAULT 0,
   is_active             INTEGER NOT NULL DEFAULT 1,
   deleted_at            TEXT,
+  auto_tag_id           TEXT,                  -- 予約申込時に friend に自動付与するタグ
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')), auto_tag_id TEXT REFERENCES tags(id) ON DELETE SET NULL,
-  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id)
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
+  FOREIGN KEY (auto_tag_id) REFERENCES tags(id) ON DELETE SET NULL
 );
 
 CREATE TABLE message_templates (
@@ -748,6 +799,23 @@ CREATE TABLE tags (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE target_messages_log (
+  id                   TEXT PRIMARY KEY,
+  target_id            TEXT NOT NULL REFERENCES line_targets (id) ON DELETE CASCADE,
+  direction            TEXT NOT NULL CHECK (direction IN ('incoming', 'outgoing')),
+  message_type         TEXT NOT NULL,
+  content              TEXT NOT NULL,
+  sender_line_user_id  TEXT,
+  sender_display_name  TEXT,
+  source               TEXT,
+  line_account_id      TEXT,
+  sender_staff_id      TEXT,
+  sender_name          TEXT,
+  sender_icon_url      TEXT,
+  line_message_id      TEXT,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
 CREATE TABLE templates (
   id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
@@ -768,7 +836,7 @@ CREATE TABLE tracked_links (
   click_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-, intro_template_id TEXT REFERENCES message_templates (id) ON DELETE SET NULL, reward_template_id TEXT REFERENCES message_templates (id) ON DELETE SET NULL, og_title TEXT, og_description TEXT, og_image_url TEXT);
+, intro_template_id TEXT REFERENCES message_templates (id) ON DELETE SET NULL, reward_template_id TEXT REFERENCES message_templates (id) ON DELETE SET NULL, og_title TEXT, og_description TEXT, og_image_url TEXT, line_account_id TEXT REFERENCES line_accounts(id) ON DELETE SET NULL, short_code TEXT);
 
 CREATE TABLE traffic_pools (
   id TEXT PRIMARY KEY,
@@ -814,6 +882,12 @@ CREATE INDEX idx_ad_conversion_logs_status ON ad_conversion_logs (status);
 
 CREATE INDEX idx_affiliate_clicks_affiliate ON affiliate_clicks (affiliate_id);
 
+CREATE INDEX idx_affiliate_links_affiliate ON affiliate_links (affiliate_id);
+
+CREATE INDEX idx_affiliate_links_offer ON affiliate_links (offer_id);
+
+CREATE UNIQUE INDEX idx_affiliates_friend ON affiliates (friend_id) WHERE friend_id IS NOT NULL;
+
 CREATE INDEX idx_auto_replies_template_id ON auto_replies(template_id);
 
 CREATE INDEX idx_automation_logs_automation ON automation_logs (automation_id);
@@ -838,7 +912,7 @@ CREATE INDEX idx_calendar_bookings_friend ON calendar_bookings (friend_id);
 
 CREATE INDEX idx_calendar_bookings_start ON calendar_bookings (start_at);
 
-CREATE INDEX idx_chats_friend ON chats (friend_id);
+CREATE UNIQUE INDEX idx_chats_friend_unique ON chats (friend_id);
 
 CREATE INDEX idx_chats_operator ON chats (operator_id);
 
@@ -908,6 +982,12 @@ CREATE INDEX idx_idempotency_expires ON booking_idempotency_keys (expires_at);
 CREATE INDEX idx_line_accounts_display_order
   ON line_accounts (display_order, created_at);
 
+CREATE INDEX idx_line_targets_last_message_at ON line_targets (last_message_at);
+
+CREATE INDEX idx_line_targets_line_target_id ON line_targets (line_target_id);
+
+CREATE INDEX idx_line_targets_type ON line_targets (target_type);
+
 CREATE INDEX idx_link_clicks_friend ON link_clicks (friend_id);
 
 CREATE INDEX idx_link_clicks_link ON link_clicks (tracked_link_id);
@@ -930,7 +1010,11 @@ CREATE INDEX idx_notifications_status ON notifications (status);
 
 CREATE INDEX idx_ref_tracking_friend ON ref_tracking (friend_id);
 
+CREATE INDEX idx_ref_tracking_friend_created ON ref_tracking(friend_id, created_at);
+
 CREATE INDEX idx_ref_tracking_ref    ON ref_tracking (ref_code);
+
+CREATE INDEX idx_ref_tracking_ref_created ON ref_tracking(ref_code, created_at);
 
 CREATE INDEX idx_reminder_steps_reminder ON reminder_steps (reminder_id);
 
@@ -956,7 +1040,18 @@ CREATE INDEX idx_stripe_events_friend ON stripe_events (friend_id);
 
 CREATE INDEX idx_stripe_events_type ON stripe_events (event_type);
 
+CREATE INDEX idx_target_messages_log_created_at ON target_messages_log (created_at);
+
+CREATE UNIQUE INDEX idx_target_messages_log_line_message_id
+  ON target_messages_log (target_id, line_message_id)
+  WHERE line_message_id IS NOT NULL;
+
+CREATE INDEX idx_target_messages_log_target_id ON target_messages_log (target_id);
+
 CREATE INDEX idx_templates_category ON templates (category);
+
+CREATE UNIQUE INDEX idx_tracked_links_short_code
+  ON tracked_links (short_code) WHERE short_code IS NOT NULL;
 
 CREATE INDEX idx_update_history_started ON update_history(started_at DESC);
 

@@ -85,6 +85,8 @@ export async function runRollback(
     scriptName: ctx.workerName,
     scriptContent: bytes,
     bindings,
+    compatibilityFlags: ['nodejs_compat'],
+    keepAssets: true,
   });
 
   // Step 4: admin Pages rollback. Done before liff so a failure here
@@ -100,12 +102,15 @@ export async function runRollback(
 
   // Step 5: liff Pages rollback. Customer-facing, done last so the swap
   // back happens only after the admin console is already on the old
-  // version.
-  await rollbackPagesDeployment({
-    creds: ctx.creds,
-    projectName: ctx.liffPagesProject,
-    deploymentId: snap.snapshotLiffDeployment,
-  });
+  // version. Skipped for worker-assets installs (no LIFF Pages project —
+  // the Worker script rollback in step 3 already restored their LIFF).
+  if (ctx.liffPagesProject && snap.snapshotLiffDeployment) {
+    await rollbackPagesDeployment({
+      creds: ctx.creds,
+      projectName: ctx.liffPagesProject,
+      deploymentId: snap.snapshotLiffDeployment,
+    });
+  }
 
   await ev.emit({ step: 'rollback', status: 'done' });
 }

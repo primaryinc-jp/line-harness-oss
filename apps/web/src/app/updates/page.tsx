@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL!
-const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY!
+// self-update を構成した環境 (create-line-harness セットアップ) でのみ設定される。
+// 未設定 = 自動アップデート非構成環境なので、この画面は fetch せず案内のみ表示する。
+const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY
+const MANUAL_UPDATE_GUIDE_URL =
+  'https://github.com/Shudesu/line-harness-oss/blob/main/docs/wiki/26-Manual-Update.md' 
 
 interface Row {
   id: string
@@ -16,9 +20,15 @@ interface Row {
   rollback_expires_at: number | null
 }
 
-async function fetchHistory(): Promise<Row[]> {
+type LoadState =
+  | { kind: 'loading' }
+  | { kind: 'ready'; rows: Row[] }
+  | { kind: 'unconfigured' }
+  | { kind: 'error'; message: string }
+
+async function fetchHistory(adminKey: string): Promise<Row[]> {
   const r = await fetch(`${API_URL}/admin/update/history`, {
-    headers: { 'x-admin-api-key': ADMIN_KEY },
+    headers: { 'x-admin-api-key': adminKey },
   })
   if (!r.ok) throw new Error(`history fetch ${r.status}`)
   const j = (await r.json()) as { history: Row[] }
@@ -26,24 +36,52 @@ async function fetchHistory(): Promise<Row[]> {
 }
 
 export default function UpdatesPage() {
-  const [rows, setRows] = useState<Row[]>([])
-  const [error, setError] = useState<string | null>(null)
+  const [state, setState] = useState<LoadState>({ kind: 'loading' })
 
   useEffect(() => {
-    fetchHistory()
-      .then(setRows)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    if (!ADMIN_KEY) {
+      setState({ kind: 'unconfigured' })
+      return
+    }
+    fetchHistory(ADMIN_KEY)
+      .then((rows) => setState({ kind: 'ready', rows }))
+      .catch((e) => {
+        // 401/403 = キー不一致 or 未構成。ネットワーク失敗も含め、
+        // 運用者を驚かせる赤エラーではなく状況の説明を出す。
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/ 40[13]$/.test(msg)) setState({ kind: 'unconfigured' })
+        else setState({ kind: 'error', message: msg })
+      })
   }, [])
+
+  const rows = state.kind === 'ready' ? state.rows : []
 
   return (
     <div className="max-w-3xl mx-auto p-6">
       <h1 className="text-xl font-semibold mb-4">アップデート履歴</h1>
-      {error && (
-        <div className="text-red-700 bg-red-50 p-3 rounded mb-4 text-sm">
-          履歴取得に失敗: {error}
+      {state.kind === 'unconfigured' && (
+        <div className="text-gray-600 bg-gray-50 p-4 rounded mb-4 text-sm leading-relaxed">
+          この環境では自動アップデートが構成されていないため、履歴はありません。
+          <br />
+          自動アップデートは <code className="text-xs">create-line-harness</code>{' '}
+          でセットアップした環境で利用できます。自前でデプロイしている場合は{' '}
+          <a
+            className="underline"
+            href={MANUAL_UPDATE_GUIDE_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            手動アップデートガイド
+          </a>{' '}
+          をご覧ください。
         </div>
       )}
-      {!error && rows.length === 0 && (
+      {state.kind === 'error' && (
+        <div className="text-amber-800 bg-amber-50 p-3 rounded mb-4 text-sm">
+          履歴を取得できませんでした（{state.message}）。時間をおいて再読み込みしてください。
+        </div>
+      )}
+      {state.kind === 'ready' && rows.length === 0 && (
         <p className="text-gray-500 text-sm">履歴はまだありません。</p>
       )}
       {rows.length > 0 && (
