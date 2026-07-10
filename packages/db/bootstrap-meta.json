@@ -52,8 +52,8 @@
     "044_forms_og.sql",
     "045_menus_auto_tag.sql",
     "046_staff_icon_url.sql",
-    "047_line_targets.sql",
-    "900_primaryinc_message_sender_audit.sql"
+    "900_primaryinc_message_sender_audit.sql",
+    "901_primaryinc_line_targets.sql"
   ],
   "migrationCount": 54
 }

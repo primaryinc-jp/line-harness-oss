@@ -41,7 +41,7 @@ export function registerSendMessage(server: McpServer): void {
         .boolean()
         .default(false)
         .describe(
-          "Mark as test send. Prepends 【テスト配信】 to text messages, adds test banner to flex messages.",
+          "Prepend a 【テスト配信】 label to text messages / add a test banner to flex messages. NOT a dry run: the message is still actually delivered to the recipient — including every member of a group/room — with normal notifications and billing.",
         ),
       senderMode: z
         .enum(["official", "self"])
@@ -55,8 +55,21 @@ export function registerSendMessage(server: McpServer): void {
     async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId }) => {
       try {
         const client = getClient();
-        if (!friendId && !(targetType && targetId)) {
-          throw new Error("friendId is required unless targetType and targetId are both provided");
+        // Destination must be exactly one of friendId XOR (targetType+targetId).
+        // Ambiguous or partial input fails BEFORE sending: an LLM leaving a
+        // stale friendId alongside a target (or vice versa) must not silently
+        // pick one and deliver to the wrong conversation.
+        const hasTarget = Boolean(targetType || targetId);
+        if (friendId && hasTarget) {
+          throw new Error(
+            "Specify exactly one destination: either friendId OR targetType+targetId, not both",
+          );
+        }
+        if (hasTarget && !(targetType && targetId)) {
+          throw new Error("targetType and targetId must both be provided to send to a group/room");
+        }
+        if (!friendId && !hasTarget) {
+          throw new Error("A destination is required: friendId, or targetType+targetId");
         }
 
         // Add test label
@@ -85,34 +98,36 @@ export function registerSendMessage(server: McpServer): void {
           }
         }
 
-        // Auto-track URLs in flex messages
-        const recipientLabel = targetType && targetId
-          ? `${targetType} ${targetId.slice(0, 8)}`
-          : `DM to ${friendId!.slice(0, 8)}`;
-        const { content: trackedContent } = await autoTrackUrls(
-          client,
-          finalContent,
-          messageType,
-          recipientLabel,
-        );
-
         const senderSelection = senderStaffId ? { senderStaffId } : senderMode ? { senderMode } : undefined;
-        const result = targetType && targetId
-          ? await client.targets.sendMessage(
-              targetType,
-              targetId,
-              trackedContent,
-              messageType,
-              altText,
-              senderSelection,
-            )
-          : await client.friends.sendMessage(
-              friendId!,
-              trackedContent,
-              messageType,
-              altText,
-              senderSelection,
-            );
+        let result: { messageId: string };
+        if (targetType && targetId) {
+          // Link tracking for targets happens server-side in the worker
+          // (per-account short links) — no MCP-side pre-tracking, matching the
+          // upstream trackLinks contract.
+          result = await client.targets.sendMessage(
+            targetType,
+            targetId,
+            finalContent,
+            messageType,
+            altText,
+            senderSelection,
+          );
+        } else {
+          // Friend path keeps the legacy MCP-side URL auto-tracking.
+          const { content: trackedContent } = await autoTrackUrls(
+            client,
+            finalContent,
+            messageType,
+            `DM to ${friendId!.slice(0, 8)}`,
+          );
+          result = await client.friends.sendMessage(
+            friendId!,
+            trackedContent,
+            messageType,
+            altText,
+            senderSelection,
+          );
+        }
         return {
           content: [
             {

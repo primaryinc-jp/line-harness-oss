@@ -20,10 +20,6 @@ vi.mock('@line-crm/db', () => ({
   addTagToFriend: vi.fn(),
   getEntryRouteByRefCode: vi.fn(),
   getMessageTemplateById: vi.fn(),
-  getLineTargetByLineTargetId: vi.fn(),
-  upsertLineTarget: vi.fn(),
-  setLineTargetActive: vi.fn(),
-  logTargetMessage: vi.fn(),
 }));
 
 vi.mock('@line-crm/line-sdk', async () => {
@@ -37,6 +33,10 @@ vi.mock('@line-crm/line-sdk', async () => {
 
 vi.mock('../services/event-bus.js', () => ({
   fireEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../services/target-webhook.js', () => ({
+  handleTargetEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../services/step-delivery.js', () => ({
@@ -162,120 +162,49 @@ describe('POST /webhook — DoS defenses (#104)', () => {
 });
 
 describe('POST /webhook — group/room target events', () => {
-  const signedHeaders = {
-    'Content-Type': 'application/json',
-    // 44 chars to pass the cheap length pre-check; verifySignature is mocked
-    'X-Line-Signature': 'a'.repeat(43) + '=',
-  };
-
-  async function postEvent(event: Record<string, unknown>) {
+  // Handler details live in services/target-webhook.test.ts; this file only
+  // asserts the routing contract: group/room events are delegated to the
+  // service and never fall through to the 1:1 friend paths.
+  test('group event is delegated to handleTargetEvent and skips friend paths', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);
+    const { handleTargetEvent } = await import('../services/target-webhook.js');
+    const { getFriendByLineUserId } = await import('@line-crm/db');
+
     const app = setupApp();
     const res = await app.request(
       '/webhook',
       {
         method: 'POST',
-        headers: signedHeaders,
-        body: JSON.stringify({ destination: 'x', events: [event] }),
+        headers: {
+          'Content-Type': 'application/json',
+          // 44 chars to pass the cheap length pre-check; verifySignature is mocked
+          'X-Line-Signature': 'a'.repeat(43) + '=',
+        },
+        body: JSON.stringify({
+          destination: 'x',
+          events: [{
+            type: 'message',
+            replyToken: 'rt',
+            source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
+            message: { id: 'mid-1', type: 'text', text: '内見できますか' },
+            timestamp: 0,
+            mode: 'active',
+            webhookEventId: 'we-1',
+            deliveryContext: { isRedelivery: false },
+          }],
+        }),
       },
       baseEnv,
       baseExecutionCtx,
     );
-    // Event handling runs in waitUntil — await it so assertions see the writes
-    const waitUntil = vi.mocked(baseExecutionCtx.waitUntil);
-    for (const call of waitUntil.mock.calls) await call[0];
-    return res;
-  }
+    // Event handling runs in waitUntil — await it so assertions see the calls
+    for (const call of vi.mocked(baseExecutionCtx.waitUntil).mock.calls) await call[0];
 
-  test('join event registers the group target with its summary name', async () => {
-    const { LineClient } = await import('@line-crm/line-sdk');
-    const getGroupSummary = vi.fn().mockResolvedValue({
-      groupId: 'Cgroup1',
-      groupName: '田中家グループ',
-      pictureUrl: 'https://example.com/p.png',
-    });
-    vi.mocked(LineClient).mockImplementation(() => ({ getGroupSummary }) as unknown as InstanceType<typeof LineClient>);
-
-    const { getLineTargetByLineTargetId, upsertLineTarget } = await import('@line-crm/db');
-    vi.mocked(getLineTargetByLineTargetId).mockResolvedValue(null);
-    vi.mocked(upsertLineTarget).mockResolvedValue({
-      id: 'tgt-1', target_type: 'group', line_target_id: 'Cgroup1', display_name: '田中家グループ',
-      picture_url: null, is_active: 1, line_account_id: null, metadata: null,
-      last_message_at: null, created_at: '', updated_at: '',
-    });
-
-    const res = await postEvent({
-      type: 'join',
-      replyToken: 'rt',
+    expect(res.status).toBe(200);
+    expect(handleTargetEvent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(handleTargetEvent).mock.calls[0][2]).toMatchObject({
       source: { type: 'group', groupId: 'Cgroup1' },
-      timestamp: 0,
-      mode: 'active',
-      webhookEventId: 'we-1',
-      deliveryContext: { isRedelivery: false },
     });
-    expect(res.status).toBe(200);
-    expect(getGroupSummary).toHaveBeenCalledWith('Cgroup1');
-    expect(upsertLineTarget).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      targetType: 'group',
-      lineTargetId: 'Cgroup1',
-      displayName: '田中家グループ',
-    }));
-  });
-
-  test('group text message is logged with sender attribution and skips friend paths', async () => {
-    const { LineClient } = await import('@line-crm/line-sdk');
-    const getGroupMemberProfile = vi.fn().mockResolvedValue({ userId: 'U1', displayName: '田中太郎' });
-    vi.mocked(LineClient).mockImplementation(() => ({ getGroupMemberProfile }) as unknown as InstanceType<typeof LineClient>);
-
-    const { getLineTargetByLineTargetId, upsertLineTarget, logTargetMessage, getFriendByLineUserId } = await import('@line-crm/db');
-    const existing = {
-      id: 'tgt-1', target_type: 'group' as const, line_target_id: 'Cgroup1', display_name: '田中家グループ',
-      picture_url: null, is_active: 1, line_account_id: null, metadata: null,
-      last_message_at: null, created_at: '', updated_at: '',
-    };
-    vi.mocked(getLineTargetByLineTargetId).mockResolvedValue(existing);
-    vi.mocked(upsertLineTarget).mockResolvedValue(existing);
-
-    const res = await postEvent({
-      type: 'message',
-      replyToken: 'rt',
-      source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
-      message: { id: 'mid-1', type: 'text', text: '内見できますか' },
-      timestamp: 0,
-      mode: 'active',
-      webhookEventId: 'we-2',
-      deliveryContext: { isRedelivery: false },
-    });
-    expect(res.status).toBe(200);
-    expect(getGroupMemberProfile).toHaveBeenCalledWith('Cgroup1', 'U1');
-    expect(logTargetMessage).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      targetId: 'tgt-1',
-      direction: 'incoming',
-      messageType: 'text',
-      content: '内見できますか',
-      senderLineUserId: 'U1',
-      senderDisplayName: '田中太郎',
-      // dedupe key for LINE webhook redelivery
-      lineMessageId: 'mid-1',
-    }));
-    // Group messages must never fall through to the 1:1 friend path
     expect(getFriendByLineUserId).not.toHaveBeenCalled();
-  });
-
-  test('leave event deactivates the target', async () => {
-    const { LineClient } = await import('@line-crm/line-sdk');
-    vi.mocked(LineClient).mockImplementation(() => ({}) as unknown as InstanceType<typeof LineClient>);
-    const { setLineTargetActive } = await import('@line-crm/db');
-
-    const res = await postEvent({
-      type: 'leave',
-      source: { type: 'group', groupId: 'Cgroup1' },
-      timestamp: 0,
-      mode: 'active',
-      webhookEventId: 'we-3',
-      deliveryContext: { isRedelivery: false },
-    });
-    expect(res.status).toBe(200);
-    expect(setLineTargetActive).toHaveBeenCalledWith(expect.anything(), 'Cgroup1', false);
   });
 });

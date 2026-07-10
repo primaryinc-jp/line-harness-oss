@@ -31,6 +31,17 @@ export function registerGetConversation(server: McpServer): void {
     async ({ friendId, targetType, targetId, limit, before }) => {
       try {
         const client = getClient();
+        // Same exactly-one destination contract as send_message: ambiguous or
+        // partial input fails instead of silently reading another conversation.
+        const hasTarget = Boolean(targetType || targetId);
+        if (friendId && hasTarget) {
+          throw new Error(
+            "Specify exactly one conversation: either friendId OR targetType+targetId, not both",
+          );
+        }
+        if (hasTarget && !(targetType && targetId)) {
+          throw new Error("targetType and targetId must both be provided to read a group/room conversation");
+        }
         if (targetType && targetId) {
           const targetResult = await client.targets.getConversation(targetType, targetId, { limit, before });
           return {
@@ -43,7 +54,7 @@ export function registerGetConversation(server: McpServer): void {
           };
         }
         if (!friendId) {
-          throw new Error("friendId is required unless targetType and targetId are both provided");
+          throw new Error("A conversation is required: friendId, or targetType+targetId");
         }
         const result = await client.conversations.get({ friendId, limit, before });
         return {

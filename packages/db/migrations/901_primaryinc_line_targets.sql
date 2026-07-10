@@ -1,4 +1,6 @@
--- 047: LINE group/room conversation targets (P0 group support)
+-- 901 (fork-local primaryinc migration): LINE group/room conversation targets
+-- (P0 group support). Fork-local migrations use the 900+ prefix so they can
+-- never collide with upstream's numbered migrations (see docs/STAFF_MESSAGE_SENDER.md).
 --
 -- line_targets: group/room conversation targets. Rows are registered when the
 -- official account joins a group/room (join event) or when a message occurs

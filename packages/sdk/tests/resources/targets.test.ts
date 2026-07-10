@@ -57,4 +57,15 @@ describe('TargetsResource', () => {
     })
     expect(result).toEqual({ messageId: 'm1' })
   })
+
+  it('sendMessage() passes trackLinks through to the worker', async () => {
+    const http = mockHttp({ post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }) })
+    const resource = new TargetsResource(http)
+    await resource.sendMessage('group', 'Cg1', 'https://example.com', 'text', undefined, undefined, { trackLinks: false })
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'https://example.com',
+      trackLinks: false,
+    })
+  })
 })

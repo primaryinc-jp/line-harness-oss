@@ -314,6 +314,27 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     }));
   });
 
+  test('trackLinks:false skips server-side URL auto-tracking', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const { autoTrackContent } = await import('../services/auto-track.js');
+
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'https://example.com', trackLinks: false, senderMode: 'official' }),
+    });
+    expect(res.status).toBe(200);
+    expect(autoTrackContent).not.toHaveBeenCalled();
+    expect(pushMessage).toHaveBeenCalledWith(
+      'Cabcdef0123456789',
+      [{ type: 'text', text: 'https://example.com' }],
+      undefined,
+    );
+  });
+
   test('rejects sends to inactive targets with 409', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, is_active: 0 });
     const app = setupApp();

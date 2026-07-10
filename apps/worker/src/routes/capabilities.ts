@@ -53,6 +53,20 @@ capabilities.get('/api/capabilities', async (c) => {
       identity: {
         primaryKey: 'line_friend_id',
         supportedLinks: ['x_user_id', 'ig_igsid'],
+        // Identity contract for group/room conversation targets (the
+        // `targets` / `group_conversations` features). Friends are NOT
+        // addressable through /api/targets — 1:1 conversations stay on the
+        // /api/friends surface keyed by line_friend_id.
+        targets: {
+          // Supported values of :targetType (and the `targetType` field).
+          types: ['group', 'room'],
+          // Canonical identifier: the harness row id returned as `id`.
+          primaryKey: 'target_id',
+          // :targetId path segments additionally resolve raw LINE ids
+          // (groupId/roomId, returned as `targetId`) as a convenience.
+          acceptedIds: ['target_id', 'line_group_id', 'line_room_id'],
+          friendsAddressable: false,
+        },
       },
       endpoints: {
         health: '/api/health',

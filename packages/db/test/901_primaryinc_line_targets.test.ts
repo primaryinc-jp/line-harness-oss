@@ -16,7 +16,7 @@ function loadDb(): Database.Database {
   const schema = readFileSync(join(PKG_ROOT, 'schema.sql'), 'utf8');
   db.exec(schema);
   const migration = readFileSync(
-    join(PKG_ROOT, 'migrations', '047_line_targets.sql'),
+    join(PKG_ROOT, 'migrations', '901_primaryinc_line_targets.sql'),
     'utf8',
   );
   db.exec(migration);
@@ -42,7 +42,7 @@ function asD1(db: Database.Database): D1Database {
   return { prepare: (sql: string) => wrap(sql) } as unknown as D1Database;
 }
 
-describe('047_line_targets.sql', () => {
+describe('901_primaryinc_line_targets.sql', () => {
   let db: Database.Database;
 
   beforeEach(() => {

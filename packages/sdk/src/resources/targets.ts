@@ -82,6 +82,14 @@ export class TargetsResource {
     messageType: MessageType = 'text',
     altText?: string,
     sender?: MessageSenderSelection,
+    options?: {
+      /**
+       * Wrap URLs in the message with per-account tracked short links on the
+       * worker (default true). Tracking happens server-side — callers must not
+       * pre-track content themselves.
+       */
+      trackLinks?: boolean
+    },
   ): Promise<{ messageId: string }> {
     const res = await this.http.post<ApiResponse<{ messageId: string }>>(
       `/api/targets/${targetType}/${encodeURIComponent(targetId)}/messages`,
@@ -90,6 +98,7 @@ export class TargetsResource {
         content,
         ...(altText ? { altText } : {}),
         ...(sender ?? {}),
+        ...(options?.trackLinks !== undefined ? { trackLinks: options.trackLinks } : {}),
       },
     )
     return res.data

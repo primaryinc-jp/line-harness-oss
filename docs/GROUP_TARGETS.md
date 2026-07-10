@@ -46,12 +46,11 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   合わせて集約する（送信先が複数あるときに自動選択しないのは
   呼び出し側 workflow の責務）
 - 送信 body は friend 送信と同じ:
-  `{ messageType?, content, altText?, senderMode?, senderStaffId? }`
+  `{ messageType?, content, altText?, senderMode?, senderStaffId?, trackLinks? }`。
+  URL の計測リンク変換はサーバー側で行う（`trackLinks: false` で無効化。
+  呼び出し側でのpre-trackingは不要・非推奨）
 - bot が退出済み（`isActive=false`）の target への送信は 409
 - `limit` は 1..200 の整数、`offset` は 0 以上の整数。範囲外・非数値は 400
-
-対応可否は `GET /api/capabilities` の `features` に `targets` /
-`group_conversations` が含まれるかで判定できる。
 
 ## SDK / MCP
 
@@ -59,10 +58,27 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
 - MCP: `manage_targets`（list / get / set_metadata）、
   `get_conversation` と `send_message` は `targetType` + `targetId` 指定で
   グループ/ルームに対応
+- MCP の送信先/会話は exactly-one 制約: `friendId` XOR
+  `targetType`+`targetId`。両方指定・不完全指定はエラーになる
+- `manage_targets set_metadata` は既存の `salesCustomerPageId` /
+  `salesDealPageId` を別の値へ上書きする場合 `force: true` が必須
+  （1 target = 1 primary 顧客/商談の前提を無警告で壊さないため）
+
+## Capabilities
+
+`GET /api/capabilities` の `features` に `targets` / `group_conversations` が
+含まれるかで対応可否を判定する。`identity.targets` に identity 契約がある:
+
+- `types: ['group', 'room']` — 対応 targetType
+- `primaryKey: 'target_id'` — 正規 ID は harness 行 ID（レスポンスの `id`）
+- `acceptedIds` — パスの `:targetId` は harness ID に加え raw LINE
+  groupId/roomId も解決される
+- `friendsAddressable: false` — friend は `/api/targets` では扱えない
+  （1:1 は従来どおり `/api/friends`）
 
 ## スキーマ
 
-migration `047_line_targets.sql`（`schema.sql` にも同梱）:
+migration `901_primaryinc_line_targets.sql`（fork-local 900番台 prefix、`schema.sql` にも同梱）:
 
 - `line_targets` — target 本体。`target_type`（group|room）、
   `line_target_id`（UNIQUE）、`display_name`、`metadata`、`last_message_at` など

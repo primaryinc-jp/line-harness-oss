@@ -5,7 +5,7 @@ import { getClient } from "../client.js";
 export function registerManageTargets(server: McpServer): void {
   server.tool(
     "manage_targets",
-    "Manage LINE group/room conversation targets. Actions: 'list' (all group/room targets with sales metadata), 'get' (target detail incl. observed participants), 'set_metadata' (merge metadata fields, e.g. salesCustomerPageId for CRM linking). Targets are registered automatically when the official account joins a group/room or a message occurs there.",
+    "Manage LINE group/room conversation targets. Actions: 'list' (all group/room targets with sales metadata), 'get' (target detail incl. observed participants), 'set_metadata' (merge metadata fields, e.g. salesCustomerPageId for CRM linking). Overwriting or clearing an existing sales link (salesCustomerPageId / salesDealPageId) to a different value is rejected unless force=true — a target is linked to exactly one primary customer/deal and silent relinking is unsafe. Targets are registered automatically when the official account joins a group/room or a message occurs there.",
     {
       action: z
         .enum(["list", "get", "set_metadata"])
@@ -35,8 +35,14 @@ export function registerManageTargets(server: McpServer): void {
         .describe("Include targets the bot has left (for 'list')"),
       limit: z.number().default(50).describe("Max targets to return (for 'list')"),
       offset: z.number().default(0).describe("Pagination offset (for 'list')"),
+      force: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Required to overwrite or clear an existing sales link (salesCustomerPageId / salesDealPageId) with a different value (for 'set_metadata'). Confirm the relink with the user before setting this.",
+        ),
     },
-    async ({ action, targetType, targetId, metadata, metadataFilter, lineAccountId, includeInactive, limit, offset }) => {
+    async ({ action, targetType, targetId, metadata, metadataFilter, lineAccountId, includeInactive, limit, offset, force }) => {
       try {
         const client = getClient();
 
@@ -73,6 +79,30 @@ export function registerManageTargets(server: McpServer): void {
         if (!metadata || Object.keys(metadata).length === 0) {
           throw new Error("metadata is required for action 'set_metadata'");
         }
+
+        // Sales links bind a target to exactly one primary customer/deal
+        // (P0 requirement). Changing or clearing an established link must be
+        // an explicit, forced operation — never a side effect of a routine
+        // metadata merge.
+        const PROTECTED_LINK_KEYS = ["salesCustomerPageId", "salesDealPageId"] as const;
+        const touchedLinkKeys = PROTECTED_LINK_KEYS.filter((k) => k in metadata);
+        if (touchedLinkKeys.length > 0 && !force) {
+          const current = await client.targets.get(targetType, targetId);
+          const conflicts = touchedLinkKeys.filter((k) => {
+            const existing = current.metadata?.[k];
+            return existing != null && existing !== "" && existing !== metadata[k];
+          });
+          if (conflicts.length > 0) {
+            throw new Error(
+              `Refusing to overwrite existing sales link(s) without force=true: ` +
+                conflicts
+                  .map((k) => `${k}: ${JSON.stringify(current.metadata?.[k])} -> ${JSON.stringify(metadata[k])}`)
+                  .join(", ") +
+                ". Confirm the relink with the user, then retry with force=true.",
+            );
+          }
+        }
+
         const updated = await client.targets.setMetadata(targetType, targetId, metadata);
         return {
           content: [

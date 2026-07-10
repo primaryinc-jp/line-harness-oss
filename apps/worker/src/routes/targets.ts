@@ -246,6 +246,7 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
       messageType?: string;
       content: string;
       altText?: string;
+      trackLinks?: boolean;
     } & SenderSelection>();
     if (!body.content) {
       return c.json({ success: false, error: 'content is required' }, 400);
@@ -272,12 +273,17 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     const messageType = body.messageType ?? 'text';
     const sender = await resolveMessageSender(db, c.get('staff'), body);
 
-    // Auto-wrap URLs with tracking links, same as the friend send path
-    const { autoTrackContent } = await import('../services/auto-track.js');
-    const tracked = await autoTrackContent(
-      db, messageType, body.content,
-      c.env.WORKER_URL || new URL(c.req.url).origin,
-    );
+    // Auto-wrap URLs with tracking links, same as the friend send path.
+    // Link tracking is a server-side concern (per-account short links), so
+    // callers opt out with trackLinks:false instead of pre-tracking client-side.
+    let tracked = { messageType, content: body.content };
+    if (body.trackLinks !== false) {
+      const { autoTrackContent } = await import('../services/auto-track.js');
+      tracked = await autoTrackContent(
+        db, messageType, body.content,
+        c.env.WORKER_URL || new URL(c.req.url).origin,
+      );
+    }
 
     const message = buildMessage(tracked.messageType, tracked.content, body.altText);
     await lineClient.pushMessage(target.line_target_id, [message], sender.lineSender);
