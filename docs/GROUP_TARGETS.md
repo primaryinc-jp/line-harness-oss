@@ -94,6 +94,13 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   移行しても、NULL 期の履歴は account scope へ移管されない（NULL scope でのみ
   参照可能）。異なるチャネルの account が同一グループに同席するケースでの
   誤移管（漏洩）を防ぐための保守的な仕様
+- **friend 側の未紐付け（NULL）scope 非対応**: `/api/targets` は
+  `lineAccountId=`（空文字）で `line_account_id IS NULL`（レガシー未紐付け）を
+  表明できるが、`/api/friends`・`/api/friends/count`・`/api/conversations`
+  （friend 系）は非空の値のみを account 述語に使う（空 = 全アカウント）。
+  この非対称のため sales-harness クライアントは friend 側の空文字 unbound scope を
+  fail-closed（エラー）にしている。friend routes への IS NULL 対応は backlog
+  （target と同じ 3 値 scope に揃える）
 
 ### 残 P2（安全側に倒し済み・磨き込みは backlog）
 
