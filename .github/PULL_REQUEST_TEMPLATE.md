@@ -38,6 +38,7 @@
 ## Verification
 
 <!-- Commands run, screenshots checked, or reason tests were not run. -->
+<!-- Stateful/cross-layer changes should be reviewed with docs/PR-REVIEW-PLAYBOOK.md. -->
 
 - Commands:
 - Manual checks:
