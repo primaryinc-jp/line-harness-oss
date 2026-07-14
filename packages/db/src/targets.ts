@@ -101,6 +101,11 @@ export async function listLineTargets(
 
   const conditions: string[] = [];
   const binds: unknown[] = [];
+  // Orphaned targets (owning account row deleted) are invisible in every scope
+  // per the isolation contract: a dangling line_account_id must never surface,
+  // whether the list is unscoped or still filtered by the deleted id. Keep
+  // legacy unbound (NULL) and live-owner rows only. Applies to item + count.
+  conditions.push('(line_account_id IS NULL OR line_account_id IN (SELECT id FROM line_accounts))');
   if (targetType) {
     conditions.push('target_type = ?');
     binds.push(targetType);

@@ -62,6 +62,18 @@ describe('901_primaryinc_line_targets.sql', () => {
 
   beforeEach(() => {
     db = loadDb();
+    // Seed the accounts the tests bind targets to. In production a target only
+    // ever binds to an existing account row, and listLineTargets now excludes
+    // orphaned (deleted-owner) rows, so the owning accounts must exist for a
+    // bound target to appear in a list. Tests that simulate deletion remove the
+    // row explicitly (see the orphan test).
+    const seedAccount = db.prepare(
+      `INSERT INTO line_accounts (id, channel_id, name, channel_access_token, channel_secret)
+       VALUES (?, ?, ?, 'tok', 'sec')`,
+    );
+    for (const id of ['acc-1', 'acc-A', 'acc-B', 'acc-old', 'acc-X']) {
+      seedAccount.run(id, `ch-${id}`, id);
+    }
   });
 
   it('creates line_targets with the expected columns', () => {
@@ -553,9 +565,13 @@ describe('901_primaryinc_line_targets.sql', () => {
     const orphan = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
     expect(orphan.line_account_id).toBe('acc-old'); // NOT nulled → not legacy scope
 
-    // Orphaned rows are invisible under the legacy (unbound/NULL) scope, so they
-    // never fall into env-token send fallback or a different account's view.
+    // Orphaned rows are invisible in EVERY list scope: legacy (NULL), an
+    // unscoped listing, and even a query still filtered by the dangling id.
     expect((await listLineTargets(d1, { lineAccountId: null })).items).toEqual([]);
+    const unscoped = await listLineTargets(d1, {});
+    expect(unscoped.items).toEqual([]);
+    expect(unscoped.total).toBe(0);
+    expect((await listLineTargets(d1, { lineAccountId: 'acc-old' })).items).toEqual([]);
     expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).length).toBe(0);
 
     // A different account B joining the same group id does not inherit the

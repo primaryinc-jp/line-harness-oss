@@ -553,7 +553,10 @@ export default function GroupsPage() {
             </label>
           </div>
           <div className="flex-1 overflow-y-auto">
-            {loading ? (
+            {loading || accountLoading ? (
+              // While the account context (re)loads, the list effect defers, so
+              // show progress rather than a premature "no groups" — clicking
+              // Retry after an account-load failure re-enters this state.
               <p className="p-4 text-sm text-gray-400">読み込み中…</p>
             ) : accountError ? (
               <div className="p-4 text-sm text-red-600">
