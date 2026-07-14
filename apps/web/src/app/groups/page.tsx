@@ -86,6 +86,13 @@ export default function GroupsPage() {
   const [detail, setDetail] = useState<TargetDetail | null>(null)
   const [messages, setMessages] = useState<TargetMessage[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [listError, setListError] = useState<string | null>(null)
+  const [showAllParticipants, setShowAllParticipants] = useState(false)
+
+  // Cap the header participant list; LINE groups can have hundreds of speakers
+  // and an unbounded header would push the composer out of the overflow box.
+  const PARTICIPANT_PREVIEW = 20
 
   // Send form
   const [draft, setDraft] = useState('')
@@ -101,10 +108,12 @@ export default function GroupsPage() {
   const listReqRef = useRef(0)
   const detailReqRef = useRef(0)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
+  const openedTargetRef = useRef<Target | null>(null)
 
   const loadTargets = useCallback(async () => {
     const reqId = ++listReqRef.current
     setLoading(true)
+    setListError(null)
     // No account selected once loading is done means there are no accounts —
     // never issue an unscoped /api/targets request that would leak every
     // account's targets.
@@ -129,9 +138,12 @@ export default function GroupsPage() {
         setTotal(res.data.total)
       }
     } catch {
+      // Surface the failure instead of rendering an empty list, which would
+      // read as "no groups exist" and mislead operators into changing config.
       if (reqId === listReqRef.current) {
         setTargets([])
         setTotal(0)
+        setListError('グループ一覧の取得に失敗しました。')
       }
     } finally {
       if (reqId === listReqRef.current) setLoading(false)
@@ -174,12 +186,15 @@ export default function GroupsPage() {
   // finish loading so the first request is always account-scoped.
   useEffect(() => {
     detailReqRef.current++ // invalidate any in-flight detail load
+    openedTargetRef.current = null
     setSelectedId(null)
     setDetail(null)
     setMessages([])
     setDraft('')
     setSendError(null)
     setRefreshNotice(null)
+    setDetailError(null)
+    setShowAllParticipants(false)
     // The invalidated in-flight handlers skip their own cleanup on token
     // mismatch, so clear their loading flags here or the panes stay stuck.
     setDetailLoading(false)
@@ -206,23 +221,48 @@ export default function GroupsPage() {
     [],
   )
 
+  const closeTarget = useCallback(() => {
+    detailReqRef.current++ // invalidate any in-flight detail load
+    openedTargetRef.current = null
+    setSelectedId(null)
+    setDetail(null)
+    setMessages([])
+    setDraft('')
+    setSendError(null)
+    setRefreshNotice(null)
+    setDetailError(null)
+    setDetailLoading(false)
+    setShowAllParticipants(false)
+  }, [])
+
   const openTarget = useCallback(
     async (target: Target) => {
       const reqId = ++detailReqRef.current
+      openedTargetRef.current = target
       setSelectedId(target.id)
       setDetail(null)
       setMessages([])
       setDraft('')
       setSendError(null)
       setRefreshNotice(null)
+      setDetailError(null)
+      setShowAllParticipants(false)
       setDetailLoading(true)
       try {
         const { detail: d, messages: msgs } = await fetchConversation(target)
         if (reqId !== detailReqRef.current) return
-        setDetail(d)
-        setMessages(msgs)
+        if (!d) {
+          setDetailError('会話の取得に失敗しました。')
+          setDetail(null)
+        } else {
+          setDetail(d)
+          setMessages(msgs)
+        }
       } catch {
-        if (reqId === detailReqRef.current) setDetail(null)
+        if (reqId === detailReqRef.current) {
+          setDetail(null)
+          setDetailError('会話の取得に失敗しました。')
+        }
       } finally {
         if (reqId === detailReqRef.current) setDetailLoading(false)
       }
@@ -338,9 +378,11 @@ export default function GroupsPage() {
   }, [selectedId, messages.length])
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex flex-col">
       <Header title="グループ・複数人トーク" />
-      <div className="flex flex-1 overflow-hidden">
+      {/* The AppShell already pads and scrolls; size to the remaining viewport
+          rather than h-screen (which would overflow below the fold). */}
+      <div className="mt-4 flex h-[calc(100vh-160px)] overflow-hidden rounded-lg border border-gray-200 lg:h-[calc(100vh-200px)]">
         {/* target list — full width on mobile, hidden once a target is open */}
         <aside
           className={`w-full flex-col border-r border-gray-200 bg-white lg:flex lg:w-80 ${
@@ -364,6 +406,16 @@ export default function GroupsPage() {
           <div className="flex-1 overflow-y-auto">
             {loading ? (
               <p className="p-4 text-sm text-gray-400">読み込み中…</p>
+            ) : listError ? (
+              <div className="p-4 text-sm text-red-600">
+                <p>{listError}</p>
+                <button
+                  onClick={() => loadTargets()}
+                  className="mt-2 rounded border border-red-300 px-3 py-1 text-xs text-red-600 hover:bg-red-50"
+                >
+                  再試行
+                </button>
+              </div>
             ) : targets.length === 0 ? (
               <p className="p-4 text-sm text-gray-400">
                 グループがありません。公式アカウントをグループに招待するか、グループで発言があると登録されます。
@@ -426,28 +478,38 @@ export default function GroupsPage() {
         <main
           className={`flex-1 flex-col bg-gray-50 lg:flex ${selectedId ? 'flex' : 'hidden'}`}
         >
-          {!detail && !detailLoading ? (
-            <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
-              グループを選択してください
-            </div>
-          ) : detailLoading ? (
+          {detailLoading ? (
             <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
               読み込み中…
+            </div>
+          ) : detailError ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-gray-500">
+              <p className="text-red-600">{detailError}</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => openedTargetRef.current && openTarget(openedTargetRef.current)}
+                  className="rounded border border-emerald-300 px-3 py-1 text-xs text-emerald-600 hover:bg-emerald-50"
+                >
+                  再試行
+                </button>
+                <button
+                  onClick={closeTarget}
+                  className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                >
+                  一覧に戻る
+                </button>
+              </div>
+            </div>
+          ) : !detail ? (
+            <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
+              グループを選択してください
             </div>
           ) : detail ? (
             <>
               <div className="border-b border-gray-200 bg-white px-6 py-3">
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => {
-                      detailReqRef.current++
-                      setSelectedId(null)
-                      setDetail(null)
-                      setMessages([])
-                      setDraft('')
-                      setSendError(null)
-                      setRefreshNotice(null)
-                    }}
+                    onClick={closeTarget}
                     className="text-gray-400 hover:text-gray-600 lg:hidden"
                     aria-label="一覧に戻る"
                   >
@@ -463,7 +525,23 @@ export default function GroupsPage() {
                 </div>
                 {detail.participants.length > 0 && (
                   <p className="mt-1 text-xs text-gray-500">
-                    発言者: {detail.participants.map((p) => p.displayName ?? p.lineUserId).join('、')}
+                    発言者:{' '}
+                    {(showAllParticipants
+                      ? detail.participants
+                      : detail.participants.slice(0, PARTICIPANT_PREVIEW)
+                    )
+                      .map((p) => p.displayName ?? p.lineUserId)
+                      .join('、')}
+                    {detail.participants.length > PARTICIPANT_PREVIEW && (
+                      <button
+                        onClick={() => setShowAllParticipants((v) => !v)}
+                        className="ml-1 text-emerald-600 hover:underline"
+                      >
+                        {showAllParticipants
+                          ? '折りたたむ'
+                          : `他 ${detail.participants.length - PARTICIPANT_PREVIEW} 名`}
+                      </button>
+                    )}
                   </p>
                 )}
               </div>
