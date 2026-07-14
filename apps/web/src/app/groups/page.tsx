@@ -216,6 +216,10 @@ export default function GroupsPage() {
   useEffect(() => {
     detailReqRef.current++ // invalidate any in-flight detail load
     openedTargetRef.current = null
+    // Pending send notices are keyed by target row id, which survives an
+    // ownership transfer; drop them on any scope change so account A's outcome
+    // can't surface in account B's view of the same target.
+    pendingSendNoticeRef.current.clear()
     setSelectedId(null)
     setDetail(null)
     setMessages([])

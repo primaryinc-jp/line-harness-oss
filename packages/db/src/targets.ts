@@ -269,7 +269,7 @@ export async function updateLineTargetMetadata(
   // `null` = must be unbound, a string = must be that account. Returns whether a
   // row was updated (false ⇒ the owner changed under us ⇒ caller returns 409).
   opts?: { expectedAccountId?: string | null },
-): Promise<boolean> {
+): Promise<LineTarget | null> {
   let sql = `UPDATE line_targets SET metadata = ?, updated_at = ? WHERE id = ?`;
   const binds: unknown[] = [metadataJson, jstNow(), id];
   if (opts && 'expectedAccountId' in opts) {
@@ -280,8 +280,12 @@ export async function updateLineTargetMetadata(
       binds.push(opts.expectedAccountId);
     }
   }
-  const res = await db.prepare(sql).bind(...binds).run();
-  return (res.meta?.changes ?? 0) > 0;
+  // RETURNING makes the guard + read atomic: the returned row is the state the
+  // guarded write produced, so a concurrent ownership transfer can't make us
+  // echo another account's row. Null ⇒ no row matched ⇒ caller returns 409.
+  sql += ` RETURNING *`;
+  const row = await db.prepare(sql).bind(...binds).first<LineTarget>();
+  return row ?? null;
 }
 
 export interface LogTargetMessageInput {

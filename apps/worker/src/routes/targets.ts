@@ -232,23 +232,23 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
     const { asserted, expected } = bodyAccountAssertion(rawAssertion);
     const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
     const merged = { ...existing, ...fields };
-    // Apply the ownership assertion in the same UPDATE statement so it holds even
-    // if a webhook transfers the target between the read above and this write.
-    const didUpdate = await updateLineTargetMetadata(
+    // Apply the ownership assertion in the same UPDATE statement, and return the
+    // row it produced (RETURNING) so the response can't reflect a concurrent
+    // ownership transfer that happened after the initial read.
+    const updated = await updateLineTargetMetadata(
       db,
       target.id,
       JSON.stringify(merged),
       asserted ? { expectedAccountId: expected } : undefined,
     );
-    if (!didUpdate) {
+    if (!updated) {
       return c.json(
         { success: false, error: 'Target ownership changed for this account; reload before writing' },
         409,
       );
     }
 
-    const updated = await getLineTargetById(db, target.id);
-    return c.json({ success: true, data: serializeTarget(updated!) });
+    return c.json({ success: true, data: serializeTarget(updated) });
   } catch (err) {
     console.error('PUT /api/targets/:targetType/:targetId/metadata error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
