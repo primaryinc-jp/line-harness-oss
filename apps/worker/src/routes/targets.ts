@@ -83,6 +83,21 @@ function serializeTargetMessage(m: TargetMessage) {
   };
 }
 
+/**
+ * Optional account-binding assertion for reads. When the caller states which
+ * account it expects to own this target (`?lineAccountId=`), reject if
+ * ownership has since changed (e.g. account A left and B joined the same group
+ * id) so one account's UI never renders another account's thread. Omitted or
+ * empty means no assertion (back-compat for SDK/MCP callers).
+ */
+function assertTargetAccount(requested: string | undefined, owner: string | null): string | null {
+  if (requested === undefined || requested === '') return null;
+  if (requested !== owner) {
+    return 'Target ownership changed for this account; reload before viewing';
+  }
+  return null;
+}
+
 /** Resolve :targetType/:targetId (harness uuid or LINE group/room id). */
 async function resolveTarget(
   db: D1Database,
@@ -155,10 +170,14 @@ targets.get('/api/targets/:targetType/:targetId', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    const ownershipError = assertTargetAccount(c.req.query('lineAccountId'), target.line_account_id);
+    if (ownershipError) return c.json({ success: false, error: ownershipError }, 409);
 
     // Participants are derived from who has spoken (LINE only exposes full
     // member lists to verified accounts), so this is best-effort by design.
-    const participants = await getTargetParticipants(c.env.DB, target.id);
+    // Scope to the current owning account so speakers from a previous owner
+    // (before a group changed hands) don't appear in this account's view.
+    const participants = await getTargetParticipants(c.env.DB, target.id, target.line_account_id);
 
     return c.json({
       success: true,
@@ -219,12 +238,23 @@ targets.get('/api/conversations/:targetType/:targetId', async (c) => {
     if (limit === null) {
       return c.json({ success: false, error: 'limit must be an integer 1..200' }, 400);
     }
+    const ownershipError = assertTargetAccount(c.req.query('lineAccountId'), target.line_account_id);
+    if (ownershipError) return c.json({ success: false, error: ownershipError }, 409);
+
     const before = c.req.query('before') ?? null;
     // beforeId makes the cursor composite (created_at, id): created_at is the
     // LINE event time, so ties can straddle a page boundary. Pass the id of
     // the oldest message from the previous page together with its createdAt.
     const beforeId = c.req.query('beforeId') ?? null;
-    const messages = await getTargetMessages(db, target.id, { limit, before, beforeId });
+    // Scope history to the current owning account: a group that changed hands
+    // accumulates rows tagged with each era's account, and only the current
+    // owner's rows belong in this view.
+    const messages = await getTargetMessages(db, target.id, {
+      limit,
+      before,
+      beforeId,
+      lineAccountId: target.line_account_id,
+    });
 
     return c.json({
       success: true,

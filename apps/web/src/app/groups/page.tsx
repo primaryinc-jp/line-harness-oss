@@ -227,12 +227,18 @@ export default function GroupsPage() {
 
   const fetchConversation = useCallback(
     async (target: Target): Promise<{ detail: TargetDetail | null; messages: TargetMessage[] }> => {
+      // Assert the scope we loaded under: the server rejects (409) if the
+      // target's ownership changed to another account, and scopes history +
+      // participants to the current owner so a previous owner's rows don't leak.
+      const acct = selectedAccountId ? `&lineAccountId=${encodeURIComponent(selectedAccountId)}` : ''
       const [detailRes, convoRes] = await Promise.all([
         fetchApi<{ success: boolean; data: TargetDetail }>(
-          `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}`,
+          `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}${
+            acct ? `?${acct.slice(1)}` : ''
+          }`,
         ),
         fetchApi<{ success: boolean; data: { messages: TargetMessage[] } }>(
-          `/api/conversations/${target.targetType}/${encodeURIComponent(target.targetId)}?limit=100`,
+          `/api/conversations/${target.targetType}/${encodeURIComponent(target.targetId)}?limit=100${acct}`,
         ),
       ])
       return {
@@ -240,7 +246,7 @@ export default function GroupsPage() {
         messages: convoRes.success ? convoRes.data.messages : [],
       }
     },
-    [],
+    [selectedAccountId],
   )
 
   const closeTarget = useCallback(() => {
@@ -285,10 +291,15 @@ export default function GroupsPage() {
           setDetail(d)
           setMessages(msgs)
         }
-      } catch {
+      } catch (err) {
         if (reqId === detailReqRef.current) {
           setDetail(null)
-          setDetailError('会話の取得に失敗しました。')
+          const status = (err as { status?: number }).status
+          setDetailError(
+            status === 409
+              ? 'この会話は別のアカウントに移動しました。一覧を再読み込みしてください。'
+              : '会話の取得に失敗しました。',
+          )
         }
       } finally {
         if (reqId === detailReqRef.current) setDetailLoading(false)

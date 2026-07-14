@@ -337,6 +337,15 @@ export interface GetTargetMessagesOptions {
    * boundary. Without it, ties at `before` are excluded (legacy behavior).
    */
   beforeId?: string | null;
+  /**
+   * Tenant scope. When provided, only messages logged under this account are
+   * returned; `null` matches unbound (legacy env-token) rows. Omit for no
+   * filter (back-compat). A group can change owning account over time (A leaves,
+   * B joins the same group id) and each era's rows carry their own
+   * line_account_id — scoping by the current owner keeps another account's
+   * history from surfacing after a hand-off.
+   */
+  lineAccountId?: string | null;
 }
 
 export async function getTargetMessages(
@@ -345,6 +354,7 @@ export async function getTargetMessages(
   opts: GetTargetMessagesOptions = {},
 ): Promise<TargetMessage[]> {
   const { limit = 50, before = null, beforeId = null } = opts;
+  const scopeAccount = 'lineAccountId' in opts;
   // julianday() cursor: preserves sub-second precision and sorts ISO 8601
   // cursors in any timezone form correctly against stored +09:00 timestamps
   // (same rationale as GET /api/conversations/:friendId).
@@ -353,26 +363,27 @@ export async function getTargetMessages(
   // across pagination requests, and the cursor must be composite
   // ((created_at, id) < (before, beforeId)) so ties straddling a page
   // boundary are not skipped.
-  let sql: string;
-  let binds: (string | number)[];
-  if (before && beforeId) {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ?
-         AND (julianday(created_at) < julianday(?)
-              OR (julianday(created_at) = julianday(?) AND id < ?))
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, before, before, beforeId, limit];
-  } else if (before) {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ? AND julianday(created_at) < julianday(?)
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, before, limit];
-  } else {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, limit];
+  const where: string[] = ['target_id = ?'];
+  const binds: (string | number)[] = [targetId];
+  if (scopeAccount) {
+    if (opts.lineAccountId === null) {
+      where.push('line_account_id IS NULL');
+    } else {
+      where.push('line_account_id = ?');
+      binds.push(opts.lineAccountId as string);
+    }
   }
+  if (before && beforeId) {
+    where.push('(julianday(created_at) < julianday(?) OR (julianday(created_at) = julianday(?) AND id < ?))');
+    binds.push(before, before, beforeId);
+  } else if (before) {
+    where.push('julianday(created_at) < julianday(?)');
+    binds.push(before);
+  }
+  binds.push(limit);
+  const sql = `SELECT * FROM target_messages_log
+     WHERE ${where.join(' AND ')}
+     ORDER BY created_at DESC, id DESC LIMIT ?`;
   const result = await db.prepare(sql).bind(...binds).all<TargetMessage>();
   return result.results;
 }
@@ -391,7 +402,25 @@ export interface TargetParticipant {
 export async function getTargetParticipants(
   db: D1Database,
   targetId: string,
+  // Tenant scope, same contract as getTargetMessages: `undefined` = no filter,
+  // `null` = unbound rows, a string = that account. Prevents speakers from a
+  // previous owning account leaking after a group changes hands.
+  lineAccountId?: string | null,
 ): Promise<TargetParticipant[]> {
+  const scoped = arguments.length >= 3;
+  const isNull = lineAccountId === null;
+  const subClause = !scoped
+    ? ''
+    : isNull
+      ? ' AND t2.line_account_id IS NULL'
+      : ' AND t2.line_account_id = ?';
+  const outClause = !scoped ? '' : isNull ? ' AND line_account_id IS NULL' : ' AND line_account_id = ?';
+  // Bind order follows `?` appearance in the SQL string: the subquery (in the
+  // SELECT list) comes before the outer WHERE.
+  const binds: string[] = [];
+  if (scoped && !isNull) binds.push(lineAccountId as string);
+  binds.push(targetId);
+  if (scoped && !isNull) binds.push(lineAccountId as string);
   const result = await db
     .prepare(
       `SELECT sender_line_user_id AS lineUserId,
@@ -399,14 +428,14 @@ export async function getTargetParticipants(
               (SELECT t2.sender_display_name FROM target_messages_log t2
                 WHERE t2.target_id = t.target_id
                   AND t2.sender_line_user_id = t.sender_line_user_id
-                  AND t2.sender_display_name IS NOT NULL
+                  AND t2.sender_display_name IS NOT NULL${subClause}
                 ORDER BY t2.created_at DESC LIMIT 1) AS displayName
        FROM target_messages_log t
-       WHERE target_id = ? AND direction = 'incoming' AND sender_line_user_id IS NOT NULL
+       WHERE target_id = ? AND direction = 'incoming' AND sender_line_user_id IS NOT NULL${outClause}
        GROUP BY sender_line_user_id
        ORDER BY lastSpokeAt DESC`,
     )
-    .bind(targetId)
+    .bind(...binds)
     .all<TargetParticipant>();
   return result.results;
 }

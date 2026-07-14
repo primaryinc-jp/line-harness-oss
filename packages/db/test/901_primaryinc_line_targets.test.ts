@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -286,6 +286,58 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(all.map((m) => m.content).sort()).toEqual(['m0', 'm1', 'm2', 'm3']);
     // Deterministic order: ties resolved by id DESC, older message last
     expect(all[3].content).toBe('m0');
+  });
+
+  it('scopes messages and participants by line_account_id (no cross-account leak after hand-off)', async () => {
+    const d1 = asD1(db);
+    // Same group id, but ownership handed from account A to account B over time.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    // Account A era: one incoming from a speaker only A ever saw.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代の発言', lineMessageId: 'a1', lineAccountId: 'acc-A',
+      senderLineUserId: 'U-oldspeaker', senderDisplayName: 'A時代の人',
+    });
+    // Account B era (current owner): one incoming from a different speaker.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代の発言', lineMessageId: 'b1', lineAccountId: 'acc-B',
+      senderLineUserId: 'U-newspeaker', senderDisplayName: 'B時代の人',
+    });
+
+    // Unscoped read still returns everything (back-compat).
+    expect(await getTargetMessages(d1, target.id)).toHaveLength(2);
+
+    // Scoped to the current owner (B): only B-era rows.
+    const bMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' });
+    expect(bMsgs.map((m) => m.content)).toEqual(['B時代の発言']);
+    const bParts = await getTargetParticipants(d1, target.id, 'acc-B');
+    expect(bParts.map((p) => p.displayName)).toEqual(['B時代の人']);
+
+    // Scoped to A: only A-era rows.
+    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
+    expect(aMsgs.map((m) => m.content)).toEqual(['A時代の発言']);
+    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
+    expect(aParts.map((p) => p.displayName)).toEqual(['A時代の人']);
+  });
+
+  it('scopes to unbound (NULL account) rows for legacy env-token installs', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'legacy', lineMessageId: 'l1', // no lineAccountId → NULL
+      senderLineUserId: 'U-legacy', senderDisplayName: 'レガシー',
+    });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'bound', lineMessageId: 'x1', lineAccountId: 'acc-X',
+      senderLineUserId: 'U-x', senderDisplayName: 'Xさん',
+    });
+    const nullMsgs = await getTargetMessages(d1, target.id, { lineAccountId: null });
+    expect(nullMsgs.map((m) => m.content)).toEqual(['legacy']);
+    const nullParts = await getTargetParticipants(d1, target.id, null);
+    expect(nullParts.map((p) => p.displayName)).toEqual(['レガシー']);
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {

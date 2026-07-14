@@ -183,6 +183,23 @@ describe('GET /api/targets/:targetType/:targetId', () => {
     const res = await app.request('/api/targets/room/Cabcdef0123456789');
     expect(res.status).toBe(404);
   });
+
+  test('409 when the ?lineAccountId assertion does not match the current owner', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-2');
+    expect(res.status).toBe(409);
+    expect(dbMocks.getTargetParticipants).not.toHaveBeenCalled();
+  });
+
+  test('scopes participants to the current owning account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getTargetParticipants.mockResolvedValue([]);
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    expect(dbMocks.getTargetParticipants).toHaveBeenCalledWith(expect.anything(), 'tgt-1', 'acc-1');
+  });
 });
 
 describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
@@ -259,6 +276,27 @@ describe('GET /api/conversations/:targetType/:targetId', () => {
     const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=-1');
     expect(res.status).toBe(400);
     expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
+  });
+
+  test('409 when the ?lineAccountId assertion does not match the current owner', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?lineAccountId=acc-2');
+    expect(res.status).toBe(409);
+    expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
+  });
+
+  test('scopes history to the current owning account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getTargetMessages.mockResolvedValue([]);
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=50&lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    expect(dbMocks.getTargetMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.objectContaining({ lineAccountId: 'acc-1' }),
+    );
   });
 });
 
