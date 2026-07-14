@@ -513,6 +513,7 @@ CREATE TABLE line_targets (
   metadata         TEXT,
   last_message_at  TEXT,
   membership_updated_at INTEGER,
+  name_refreshed_at INTEGER,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );

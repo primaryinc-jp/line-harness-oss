@@ -81,6 +81,7 @@ describe('901_primaryinc_line_targets.sql', () => {
         'metadata',
         'last_message_at',
         'membership_updated_at',
+        'name_refreshed_at',
         'created_at',
         'updated_at',
       ].sort(),

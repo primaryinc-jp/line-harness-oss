@@ -26,6 +26,12 @@ export interface LineTarget {
    * join must not reactivate a target the bot has since left.
    */
   membership_updated_at: number | null;
+  /**
+   * LINE event.timestamp (ms epoch) of the last successful group-summary name
+   * fetch. Lets a stale name (group renamed after we first saw it) be refreshed
+   * on a later message without re-fetching on every message.
+   */
+  name_refreshed_at: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -139,6 +145,12 @@ export interface UpsertLineTargetInput {
   displayName?: string | null;
   pictureUrl?: string | null;
   lineAccountId?: string | null;
+  /**
+   * LINE event.timestamp (ms) of the group-summary fetch that produced
+   * displayName. Pass it only when displayName was actually (re)fetched so the
+   * caller can throttle future refreshes; omitted keeps the stored value.
+   */
+  nameRefreshedAt?: number | null;
 }
 
 /**
@@ -161,8 +173,8 @@ export async function upsertLineTarget(
   const now = jstNow();
   await db
     .prepare(
-      `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, name_refreshed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
        ON CONFLICT(line_target_id) DO UPDATE SET
          display_name = COALESCE(excluded.display_name, line_targets.display_name),
          picture_url = COALESCE(excluded.picture_url, line_targets.picture_url),
@@ -172,6 +184,7 @@ export async function upsertLineTarget(
          -- tenant scope back. Genuine hand-offs go through setLineTargetActive
          -- (timestamp-guarded membership transitions).
          line_account_id = COALESCE(line_targets.line_account_id, excluded.line_account_id),
+         name_refreshed_at = COALESCE(excluded.name_refreshed_at, line_targets.name_refreshed_at),
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -181,6 +194,7 @@ export async function upsertLineTarget(
       input.displayName ?? null,
       input.pictureUrl ?? null,
       input.lineAccountId ?? null,
+      input.nameRefreshedAt ?? null,
       now,
       now,
     )

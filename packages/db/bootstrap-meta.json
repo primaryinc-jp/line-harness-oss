@@ -58,7 +58,8 @@
     "048_chats_friend_unique.sql",
     "049_tracked_links_short_code.sql",
     "900_primaryinc_message_sender_audit.sql",
-    "901_primaryinc_line_targets.sql"
+    "901_primaryinc_line_targets.sql",
+    "902_primaryinc_target_name_refreshed_at.sql"
   ],
-  "migrationCount": 59
+  "migrationCount": 60
 }

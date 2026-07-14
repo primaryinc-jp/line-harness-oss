@@ -6,7 +6,12 @@ import {
   upsertLineTarget,
   setLineTargetActive,
   logTargetMessage,
+  createNotification,
 } from '@line-crm/db';
+
+// Re-fetch a group's display name from the summary API at most this often, so a
+// rename is picked up on a later message without hitting the API every message.
+const NAME_REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Group/room ("target") webhook イベント処理。
@@ -37,6 +42,10 @@ export async function handleTargetEvent(
   if (!lineTargetId) return;
 
   if (event.type === 'leave') {
+    // Snapshot before the transition so we can tell whether this leave actually
+    // deactivates a currently-active target (redelivered leaves find it already
+    // inactive → no duplicate notification).
+    const before = await getLineTargetByLineTargetId(db, lineTargetId);
     // event.timestamp guards against out-of-order redelivery; an unregistered
     // target gets an inactive tombstone row so a later stale join cannot
     // register it as active (see setLineTargetActive)
@@ -47,6 +56,41 @@ export async function handleTargetEvent(
       eventTimestamp: event.timestamp,
       lineAccountId,
     });
+
+    // Notify sales when the bot is removed from a target linked to a customer —
+    // otherwise no one notices the conversation channel is gone. Only fire on a
+    // real active→inactive transition of a linked target.
+    const transitioned =
+      before?.is_active === 1 &&
+      (before.membership_updated_at == null || before.membership_updated_at <= event.timestamp);
+    if (transitioned && before) {
+      let meta: Record<string, unknown> = {};
+      try {
+        meta = before.metadata ? (JSON.parse(before.metadata) as Record<string, unknown>) : {};
+      } catch {
+        meta = {};
+      }
+      if (typeof meta.salesCustomerPageId === 'string' && meta.salesCustomerPageId) {
+        try {
+          await createNotification(db, {
+            eventType: 'line_target_left',
+            title: 'グループ/複数人トークから退出しました',
+            body: `公式アカウントが「${before.display_name ?? lineTargetId}」から外れました。担当顧客に紐付いているため、必要なら再招待してください。`,
+            channel: 'dashboard',
+            metadata: JSON.stringify({
+              targetType,
+              lineTargetId,
+              lineAccountId,
+              salesCustomerPageId: meta.salesCustomerPageId,
+              salesDealPageId: meta.salesDealPageId ?? null,
+            }),
+          });
+        } catch (err) {
+          // Best-effort: a notification failure must not fail webhook processing.
+          console.error(`[target] leave notification failed for ${lineTargetId}:`, err);
+        }
+      }
+    }
     console.log(`[target] leave ${targetType}=${lineTargetId}`);
     return;
   }
@@ -59,11 +103,18 @@ export async function handleTargetEvent(
   const existing = await getLineTargetByLineTargetId(db, lineTargetId);
   let displayName: string | null = null;
   let pictureUrl: string | null = null;
-  if (targetType === 'group' && (event.type === 'join' || !existing?.display_name)) {
+  let nameRefreshedAt: number | undefined;
+  // Refresh the group name on join, when it is still unknown, or when the last
+  // fetch is stale (the group may have been renamed). Rooms have no summary API.
+  const nameStale =
+    existing?.name_refreshed_at == null ||
+    event.timestamp - existing.name_refreshed_at > NAME_REFRESH_INTERVAL_MS;
+  if (targetType === 'group' && (event.type === 'join' || !existing?.display_name || nameStale)) {
     try {
       const summary = await lineClient.getGroupSummary(lineTargetId);
       displayName = summary.groupName ?? null;
       pictureUrl = summary.pictureUrl ?? null;
+      nameRefreshedAt = event.timestamp;
     } catch (err) {
       console.error(`[target] group summary fetch failed for ${lineTargetId}:`, err);
     }
@@ -74,6 +125,7 @@ export async function handleTargetEvent(
     displayName,
     pictureUrl,
     lineAccountId,
+    nameRefreshedAt,
   });
 
   if (event.type === 'join') {
