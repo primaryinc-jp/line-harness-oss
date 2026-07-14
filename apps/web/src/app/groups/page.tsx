@@ -100,6 +100,7 @@ export default function GroupsPage() {
   // (which would otherwise let an operator send to the wrong account/group).
   const listReqRef = useRef(0)
   const detailReqRef = useRef(0)
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null)
 
   const loadTargets = useCallback(async () => {
     const reqId = ++listReqRef.current
@@ -232,6 +233,7 @@ export default function GroupsPage() {
   const send = useCallback(async () => {
     if (!detail || !draft.trim()) return
     const target = detail
+    const submitted = draft
     // Token as of the currently open conversation. If the operator switches
     // target or account mid-send, openTarget / the scope effect bumps this and
     // we must not touch the newer scope's state.
@@ -240,6 +242,7 @@ export default function GroupsPage() {
     setSendError(null)
     setRefreshNotice(null)
     let outcome: 'sent' | 'failed' | 'unknown' = 'failed'
+    let failMessage = '送信に失敗しました'
     try {
       const res = await fetchApi<{ success: boolean; error?: string }>(
         `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}/messages`,
@@ -251,36 +254,73 @@ export default function GroupsPage() {
           }),
         },
       )
+      // fetchApi throws on non-2xx, so a 200 with success:false is the only way
+      // to land here on failure — keep it as a defensive branch.
       if (!res.success) {
-        // Server explicitly rejected — nothing was delivered, safe to retry.
         outcome = 'failed'
-        setSendError(res.error ?? '送信に失敗しました')
+        failMessage = res.error ?? failMessage
       } else {
         outcome = 'sent'
-        setDraft('')
       }
-    } catch {
-      // Transport error: the Worker may have already pushed to the whole group
-      // before failing (e.g. logging the message afterwards threw). Presenting
-      // this as a definite failure invites a blind retry that duplicates the
-      // group-wide delivery. Report an unknown result and keep the draft.
-      outcome = 'unknown'
-      setRefreshNotice(
-        '送信結果を確認できませんでした。会話を再読み込みして反映を確認し、届いていない場合のみ再送してください。',
-      )
+    } catch (err) {
+      const status = (err as { status?: number }).status
+      if (typeof status === 'number' && status >= 400 && status < 500) {
+        // A definite rejection before delivery (e.g. 409 inactive target,
+        // 4xx validation). Nothing was sent — show the actionable error and
+        // do NOT prompt delivery verification.
+        outcome = 'failed'
+        const body = (err as { body?: { error?: string } }).body
+        failMessage = body?.error ?? `送信できませんでした (${status})`
+      } else {
+        // 5xx / network: the Worker may have already pushed to the whole group
+        // before failing (e.g. logging the message afterwards threw). A blind
+        // retry would duplicate the group-wide delivery, so report an unknown
+        // result and keep the draft.
+        outcome = 'unknown'
+      }
     } finally {
       setSending(false)
     }
-    // Refresh only if this conversation is still the selected scope. A refresh
-    // failure after a successful send must NOT read as a send failure.
-    if (outcome === 'sent' || outcome === 'unknown') {
-      if (detailReqRef.current !== scopeToken) return
+
+    // Only touch conversation-specific UI if this conversation is still open.
+    const scopeCurrent = detailReqRef.current === scopeToken
+    if (scopeCurrent) {
+      if (outcome === 'failed') {
+        setSendError(failMessage)
+      } else if (outcome === 'unknown') {
+        setRefreshNotice(
+          '送信結果を確認できませんでした。会話を再読み込みして反映を確認し、届いていない場合のみ再送してください。',
+        )
+      } else if (outcome === 'sent') {
+        // Only clear the box if the operator hasn't started a new message since.
+        setDraft((prev) => (prev === submitted ? '' : prev))
+      }
+    }
+
+    // Refresh only if this conversation is still the selected scope.
+    if ((outcome === 'sent' || outcome === 'unknown') && scopeCurrent) {
       const reqId = ++detailReqRef.current
       try {
         const { detail: d, messages: msgs } = await fetchConversation(target)
         if (reqId !== detailReqRef.current) return
         setDetail(d)
         setMessages(msgs)
+        // Reflect the new last_message_at in the list: move the row to the top
+        // (list is ordered by activity DESC) with the refreshed timestamp.
+        if (d) {
+          setTargets((prev) => {
+            const idx = prev.findIndex((t) => t.id === d.id)
+            if (idx === -1) return prev
+            const merged: Target = {
+              ...prev[idx],
+              displayName: d.displayName,
+              isActive: d.isActive,
+              metadata: d.metadata,
+              lastMessageAt: d.lastMessageAt,
+            }
+            return [merged, ...prev.filter((_, i) => i !== idx)]
+          })
+        }
       } catch {
         if (reqId === detailReqRef.current && outcome === 'sent') {
           setRefreshNotice('送信は完了しましたが、会話の再読み込みに失敗しました。')
@@ -289,12 +329,24 @@ export default function GroupsPage() {
     }
   }, [detail, draft, senderMode, fetchConversation])
 
+  // The thread renders oldest→newest, so a freshly opened (or just-sent-to)
+  // conversation must jump to the bottom to show the latest message. There is
+  // no older-message pagination here, so this never fights a manual scroll-up.
+  useEffect(() => {
+    const el = messagesScrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [selectedId, messages.length])
+
   return (
     <div className="flex h-screen flex-col">
       <Header title="グループ・複数人トーク" />
       <div className="flex flex-1 overflow-hidden">
-        {/* target list */}
-        <aside className="flex w-80 flex-col border-r border-gray-200 bg-white">
+        {/* target list — full width on mobile, hidden once a target is open */}
+        <aside
+          className={`w-full flex-col border-r border-gray-200 bg-white lg:flex lg:w-80 ${
+            selectedId ? 'hidden' : 'flex'
+          }`}
+        >
           <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
             <span className="text-sm font-medium text-gray-700">
               {targets.length}
@@ -370,8 +422,10 @@ export default function GroupsPage() {
           </div>
         </aside>
 
-        {/* conversation */}
-        <main className="flex flex-1 flex-col bg-gray-50">
+        {/* conversation — hidden on mobile until a target is selected */}
+        <main
+          className={`flex-1 flex-col bg-gray-50 lg:flex ${selectedId ? 'flex' : 'hidden'}`}
+        >
           {!detail && !detailLoading ? (
             <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
               グループを選択してください
@@ -384,6 +438,21 @@ export default function GroupsPage() {
             <>
               <div className="border-b border-gray-200 bg-white px-6 py-3">
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      detailReqRef.current++
+                      setSelectedId(null)
+                      setDetail(null)
+                      setMessages([])
+                      setDraft('')
+                      setSendError(null)
+                      setRefreshNotice(null)
+                    }}
+                    className="text-gray-400 hover:text-gray-600 lg:hidden"
+                    aria-label="一覧に戻る"
+                  >
+                    ←
+                  </button>
                   <h2 className="text-base font-semibold text-gray-800">{detail.displayName}</h2>
                   <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">
                     {typeLabel[detail.targetType]}
@@ -399,7 +468,7 @@ export default function GroupsPage() {
                 )}
               </div>
 
-              <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+              <div ref={messagesScrollRef} className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
                 {messages.length === 0 ? (
                   <p className="text-sm text-gray-400">メッセージがありません</p>
                 ) : (

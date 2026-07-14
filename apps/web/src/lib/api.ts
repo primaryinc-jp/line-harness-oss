@@ -131,7 +131,22 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
       ...options?.headers,
     },
   })
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  if (!res.ok) {
+    // Attach status + parsed body so callers can distinguish a definite
+    // rejection (4xx) from an uncertain outcome (5xx / network). Message
+    // format is preserved for existing callers that read err.message.
+    const err = new Error(`API error: ${res.status}`) as Error & {
+      status?: number
+      body?: unknown
+    }
+    err.status = res.status
+    try {
+      err.body = await res.json()
+    } catch {
+      // non-JSON error body — leave undefined
+    }
+    throw err
+  }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
