@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets, getLineTargetByLineTargetId } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -386,8 +386,12 @@ describe('901_primaryinc_line_targets.sql', () => {
       targetId: target.id, direction: 'incoming', messageType: 'text',
       content: 'A時代', lineMessageId: 'a1', lineAccountId: 'acc-A', senderLineUserId: 'U-a',
     });
-    // Account B joins the same group id — ownership hands over.
-    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    // Account B joins the same group id (membership event) — ownership hands over.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
     await logTargetMessage(d1, {
       targetId: target.id, direction: 'incoming', messageType: 'text',
       content: 'B時代', lineMessageId: 'b1', lineAccountId: 'acc-B', senderLineUserId: 'U-b',
@@ -396,6 +400,28 @@ describe('901_primaryinc_line_targets.sql', () => {
     // The A-era message must NOT be adopted into B's scope.
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).map((m) => m.content)).toEqual(['B時代']);
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
+  });
+
+  it('ownership is monotonic: a stale prior-account event cannot flip the owner back', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    // B takes over via a newer membership event.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+
+    // A stale account-A message is redelivered — must NOT reassign ownership.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+
+    // A stale account-A join (older timestamp) is redelivered — still B.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
   });
 
   it('adopts NULL-era history when the first account-aware event is a leave', async () => {

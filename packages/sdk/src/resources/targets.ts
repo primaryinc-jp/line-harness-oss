@@ -22,14 +22,27 @@ export class TargetsResource {
     private readonly defaultAccountId?: string,
   ) {}
 
+  /**
+   * Resolve the account-ownership assertion: an explicit value (including the
+   * documented unbound scopes `''` / `null`) wins; `undefined` falls back to the
+   * configured default account. Returns `undefined` when there is nothing to
+   * assert (unscoped, back-compat).
+   */
+  private resolveScope(explicit: string | null | undefined): string | null | undefined {
+    return explicit !== undefined ? explicit : this.defaultAccountId
+  }
+
   async list(params?: TargetListParams): Promise<TargetListResponse> {
     const query = new URLSearchParams()
     if (params?.type) query.set('type', params.type)
     // Same default scoping as friends/conversations: LINE_HARNESS_ACCOUNT_ID
     // (config.lineAccountId) must narrow target lists too, or a scoped MCP
     // would list/reverse-look-up targets across every account.
-    const accountId = params?.lineAccountId ?? this.defaultAccountId
-    if (accountId) query.set('lineAccountId', accountId)
+    // Empty string selects the unbound (legacy) scope; a value scopes to that
+    // account; omitted falls back to the default. Only skip when there is
+    // nothing to assert at all.
+    const acct = this.resolveScope(params?.lineAccountId)
+    if (acct !== undefined) query.set('lineAccountId', acct ?? '')
     if (params?.includeInactive) query.set('includeInactive', 'true')
     for (const [key, value] of Object.entries(params?.metadata ?? {})) {
       query.set(`metadata.${key}`, value)
@@ -52,12 +65,14 @@ export class TargetsResource {
        * since moved to another account, so a scoped client can't read another
        * account's thread via a stale target id.
        */
-      lineAccountId?: string
+      lineAccountId?: string | null
     },
   ): Promise<TargetDetail> {
-    const accountId = params?.lineAccountId ?? this.defaultAccountId
+    const acct = this.resolveScope(params?.lineAccountId)
+    // Empty string in the query asserts the unbound (legacy) scope; a value
+    // asserts that account; omitted means no assertion.
     const path = `/api/targets/${targetType}/${encodeURIComponent(targetId)}${
-      accountId ? `?lineAccountId=${encodeURIComponent(accountId)}` : ''
+      acct !== undefined ? `?lineAccountId=${encodeURIComponent(acct ?? '')}` : ''
     }`
     const res = await this.http.get<ApiResponse<TargetDetail>>(path)
     return res.data
@@ -74,13 +89,17 @@ export class TargetsResource {
        * can't rewrite another account's metadata via a stale target id. Sent as
        * a reserved key, not stored as metadata.
        */
-      lineAccountId?: string
+      lineAccountId?: string | null
     },
   ): Promise<Target> {
-    const accountId = params?.lineAccountId ?? this.defaultAccountId
+    const acct = this.resolveScope(params?.lineAccountId)
+    // Body assertions represent the unbound scope as null (the server compares
+    // against line_account_id, which is NULL for legacy targets).
+    const body =
+      acct !== undefined ? { ...fields, lineAccountId: acct === '' ? null : acct } : fields
     const res = await this.http.put<ApiResponse<Target>>(
       `/api/targets/${targetType}/${encodeURIComponent(targetId)}/metadata`,
-      accountId ? { ...fields, lineAccountId: accountId } : fields,
+      body,
     )
     return res.data
   }
@@ -93,16 +112,16 @@ export class TargetsResource {
       before?: string
       /** Id of the message `before` came from — composite cursor so messages sharing a timestamp are not skipped across pages. */
       beforeId?: string
-      /** Assert the owning account (defaults to LINE_HARNESS_ACCOUNT_ID); 409 if the target moved accounts. */
-      lineAccountId?: string
+      /** Assert the owning account (defaults to LINE_HARNESS_ACCOUNT_ID); 409 if the target moved accounts. Empty string asserts the unbound (legacy) scope. */
+      lineAccountId?: string | null
     },
   ): Promise<TargetConversation> {
     const query = new URLSearchParams()
     if (params?.limit !== undefined) query.set('limit', String(params.limit))
     if (params?.before !== undefined) query.set('before', params.before)
     if (params?.beforeId !== undefined) query.set('beforeId', params.beforeId)
-    const accountId = params?.lineAccountId ?? this.defaultAccountId
-    if (accountId) query.set('lineAccountId', accountId)
+    const acct = this.resolveScope(params?.lineAccountId)
+    if (acct !== undefined) query.set('lineAccountId', acct ?? '')
     const qs = query.toString()
     const base = `/api/conversations/${targetType}/${encodeURIComponent(targetId)}`
     const res = await this.http.get<ApiResponse<TargetConversation>>(qs ? `${base}?${qs}` : base)
@@ -127,12 +146,13 @@ export class TargetsResource {
        * Assert the owning account. Defaults to LINE_HARNESS_ACCOUNT_ID
        * (config.lineAccountId); the server rejects (409) if the target has
        * since moved to another account, so a scoped client can't push under
-       * another account's token via a stale target id.
+       * another account's token via a stale target id. Empty string / null
+       * asserts the unbound (legacy) scope.
        */
-      lineAccountId?: string
+      lineAccountId?: string | null
     },
   ): Promise<{ messageId: string }> {
-    const accountId = options?.lineAccountId ?? this.defaultAccountId
+    const acct = this.resolveScope(options?.lineAccountId)
     const res = await this.http.post<ApiResponse<{ messageId: string }>>(
       `/api/targets/${targetType}/${encodeURIComponent(targetId)}/messages`,
       {
@@ -141,7 +161,8 @@ export class TargetsResource {
         ...(altText ? { altText } : {}),
         ...(sender ?? {}),
         ...(options?.trackLinks !== undefined ? { trackLinks: options.trackLinks } : {}),
-        ...(accountId ? { lineAccountId: accountId } : {}),
+        // Body assertions use null for the unbound scope.
+        ...(acct !== undefined ? { lineAccountId: acct === '' ? null : acct } : {}),
       },
     )
     return res.data

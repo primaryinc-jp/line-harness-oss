@@ -166,7 +166,12 @@ export async function upsertLineTarget(
        ON CONFLICT(line_target_id) DO UPDATE SET
          display_name = COALESCE(excluded.display_name, line_targets.display_name),
          picture_url = COALESCE(excluded.picture_url, line_targets.picture_url),
-         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         -- Ownership is monotonic: a message/join only *first-binds* an unbound
+         -- target (NULL → account). It never reassigns a bound owner, so a
+         -- stale redelivered event from a previous account cannot flip the
+         -- tenant scope back. Genuine hand-offs go through setLineTargetActive
+         -- (timestamp-guarded membership transitions).
+         line_account_id = COALESCE(line_targets.line_account_id, excluded.line_account_id),
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -249,7 +254,14 @@ export async function setLineTargetActive(
          membership_updated_at = CASE
            WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
            THEN excluded.membership_updated_at ELSE line_targets.membership_updated_at END,
-         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         -- Ownership follows the membership timestamp: only a newer membership
+         -- event may change the owner, so a stale redelivered join/leave from a
+         -- previous account cannot flip the tenant scope back. First-bind
+         -- (membership_updated_at IS NULL) still works.
+         line_account_id = CASE
+           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           THEN COALESCE(excluded.line_account_id, line_targets.line_account_id)
+           ELSE line_targets.line_account_id END,
          updated_at = excluded.updated_at`,
     )
     .bind(

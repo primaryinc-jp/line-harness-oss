@@ -127,6 +127,42 @@ describe('TargetsResource', () => {
     expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', { salesDealPageId: 'deal-9' })
   })
 
+  it('explicit empty string selects the unbound (legacy) scope on reads', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    // Even with a default account configured, an explicit '' must win.
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.get('group', 'Cg1', { lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/targets/group/Cg1?lineAccountId=')
+    await resource.getConversation('group', 'Cg1', { lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/conversations/group/Cg1?lineAccountId=')
+  })
+
+  it('explicit empty/null asserts unbound as null in send/metadata bodies', async () => {
+    const http = mockHttp({
+      post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }),
+      put: vi.fn().mockResolvedValue({ success: true, data: {} }),
+    })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.sendMessage('group', 'Cg1', 'hi', 'text', undefined, undefined, { lineAccountId: '' })
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'hi',
+      lineAccountId: null,
+    })
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'd' }, { lineAccountId: null })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', {
+      salesDealPageId: 'd',
+      lineAccountId: null,
+    })
+  })
+
+  it('list() explicit empty string selects the unbound scope', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: emptyList }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.list({ lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/targets?lineAccountId=')
+  })
+
   it('no default account: reads/sends omit the assertion (back-compat)', async () => {
     const http = mockHttp({
       get: vi.fn().mockResolvedValue({ success: true, data: {} }),
