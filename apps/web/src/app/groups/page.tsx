@@ -75,6 +75,12 @@ function renderContent(m: Pick<TargetMessage, 'messageType' | 'content'>): strin
   return `[${m.messageType}]`
 }
 
+// Key a pending send outcome by account + target row id: the row id survives an
+// ownership transfer, so the account must be part of the identity.
+function scopeKey(accountId: string | null, rowId: string): string {
+  return `${accountId ?? ''}::${rowId}`
+}
+
 export default function GroupsPage() {
   const {
     accounts,
@@ -120,10 +126,12 @@ export default function GroupsPage() {
   const detailReqRef = useRef(0)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const openedTargetRef = useRef<Target | null>(null)
-  // Send outcomes that completed after the operator navigated away, keyed by
-  // target id, so reopening that target still surfaces the result (and avoids a
-  // blind duplicate resend of a group-wide message).
-  const pendingSendNoticeRef = useRef<Map<string, { error?: string; notice?: string }>>(new Map())
+  // A send outcome that completed after the operator navigated away. Keyed by
+  // account + target row id (an ownership transfer keeps the row id, so the
+  // account must be part of the key) and surfaced reactively when that exact
+  // conversation is open again — so reopening still shows the result and the
+  // operator doesn't blind-resend a group-wide message.
+  const [pendingSend, setPendingSend] = useState<{ key: string; error?: string; notice?: string } | null>(null)
 
   const loadTargets = useCallback(async () => {
     const reqId = ++listReqRef.current
@@ -216,10 +224,9 @@ export default function GroupsPage() {
   useEffect(() => {
     detailReqRef.current++ // invalidate any in-flight detail load
     openedTargetRef.current = null
-    // Pending send notices are keyed by target row id, which survives an
-    // ownership transfer; drop them on any scope change so account A's outcome
-    // can't surface in account B's view of the same target.
-    pendingSendNoticeRef.current.clear()
+    // Drop any pending send outcome on a scope change; it is re-evaluated by
+    // key, but clearing keeps state tidy across account switches.
+    setPendingSend(null)
     setSelectedId(null)
     setDetail(null)
     setMessages([])
@@ -302,13 +309,8 @@ export default function GroupsPage() {
         } else {
           setDetail(d)
           setMessages(msgs)
-          // Surface a send outcome that completed while this target was closed.
-          const pending = pendingSendNoticeRef.current.get(target.id)
-          if (pending) {
-            pendingSendNoticeRef.current.delete(target.id)
-            if (pending.error) setSendError(pending.error)
-            if (pending.notice) setRefreshNotice(pending.notice)
-          }
+          // A send outcome that completed while this target was closed is
+          // surfaced by the reactive effect below (keyed by account + target).
         }
       } catch (err) {
         if (reqId === detailReqRef.current) {
@@ -331,6 +333,9 @@ export default function GroupsPage() {
     if (!detail || !draft.trim()) return
     const target = detail
     const submitted = draft
+    // The account this send is scoped to, captured now so a later navigation
+    // can't misattribute the outcome to a different account.
+    const sendAccount = selectedAccountId
     // Token as of the currently open conversation. If the operator switches
     // target or account mid-send, openTarget / the scope effect bumps this and
     // we must not touch the newer scope's state.
@@ -403,12 +408,13 @@ export default function GroupsPage() {
         setDraft((prev) => (prev === submitted ? '' : prev))
       }
     } else {
+      const key = scopeKey(sendAccount, target.id)
       if (outcome === 'failed') {
-        pendingSendNoticeRef.current.set(target.id, { error: failMessage })
+        setPendingSend({ key, error: failMessage })
       } else if (outcome === 'unknown') {
-        pendingSendNoticeRef.current.set(target.id, { notice: uncertainNotice })
+        setPendingSend({ key, notice: uncertainNotice })
       } else if (outcome === 'sent') {
-        pendingSendNoticeRef.current.set(target.id, { notice: '送信は完了しました。' })
+        setPendingSend({ key, notice: '送信は完了しました。' })
       }
     }
 
@@ -472,6 +478,16 @@ export default function GroupsPage() {
     // send replaces the oldest row so the length is unchanged, yet we still
     // need to jump to the newly appended message.
   }, [selectedId, messages.length ? messages[messages.length - 1].id : null])
+
+  // Surface a send outcome that completed while its conversation was closed,
+  // but only when that exact account+target conversation is the one now open.
+  useEffect(() => {
+    if (!pendingSend || !detail) return
+    if (pendingSend.key !== scopeKey(selectedAccountId, detail.id)) return
+    if (pendingSend.error) setSendError(pendingSend.error)
+    if (pendingSend.notice) setRefreshNotice(pendingSend.notice)
+    setPendingSend(null)
+  }, [pendingSend, detail, selectedAccountId])
 
   return (
     <div className="flex flex-col">

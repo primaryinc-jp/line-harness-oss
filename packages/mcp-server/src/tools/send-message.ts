@@ -56,8 +56,14 @@ export function registerSendMessage(server: McpServer): void {
         .describe(
           "Set false to disable automatic URL shortening (/t/ tracking links, created server-side per LINE account). URLs are sent as-is. Default true.",
         ),
+      lineAccountId: z
+        .string()
+        .optional()
+        .describe(
+          "For a group/room send: assert the owning LINE account (409 if the target moved accounts, preventing a send under a different account's token). Defaults to LINE_HARNESS_ACCOUNT_ID.",
+        ),
     },
-    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId, trackLinks }) => {
+    async ({ friendId, targetType, targetId, content, messageType, altText, isTest, senderMode, senderStaffId, trackLinks, lineAccountId }) => {
       try {
         const client = getClient();
         // Destination must be exactly one of friendId XOR (targetType+targetId).
@@ -115,7 +121,7 @@ export function registerSendMessage(server: McpServer): void {
               messageType,
               altText,
               senderSelection,
-              { trackLinks },
+              { trackLinks, lineAccountId },
             )
           : await client.friends.sendMessage(
               friendId!,
