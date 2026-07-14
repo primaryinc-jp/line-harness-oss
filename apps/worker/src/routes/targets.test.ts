@@ -82,9 +82,11 @@ beforeEach(() => {
   dbMocks.jstNow.mockReturnValue('2026-07-06T12:00:00.000');
   // Staff resolution used by resolveMessageSender (default: send as self)
   dbMocks.getStaffById.mockResolvedValue({ id: 'test-staff', name: 'テスト', is_active: 1, icon_url: null });
-  // Default: metadata update succeeds (a row was changed). Tests that exercise
-  // the ownership-mismatch path override this with mockResolvedValue(false).
-  dbMocks.updateLineTargetMetadata.mockResolvedValue(true);
+  // Default: metadata update succeeds, returning the row it wrote (RETURNING).
+  // Tests that exercise the ownership-mismatch path override with null.
+  dbMocks.updateLineTargetMetadata.mockImplementation(
+    async (_db: unknown, _id: string, metadataJson: string) => ({ ...groupTarget, metadata: metadataJson }),
+  );
 });
 
 describe('GET /api/targets', () => {
@@ -266,8 +268,8 @@ describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
 
   test('409 when the conditional update matches no row (ownership changed under us)', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
-    // Atomic guard: the conditional UPDATE reports 0 rows changed.
-    dbMocks.updateLineTargetMetadata.mockResolvedValue(false);
+    // Atomic guard: the conditional UPDATE + RETURNING matches no row.
+    dbMocks.updateLineTargetMetadata.mockResolvedValue(null);
     const app = setupApp();
     const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
       method: 'PUT',

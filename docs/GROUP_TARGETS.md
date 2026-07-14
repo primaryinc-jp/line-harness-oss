@@ -145,3 +145,43 @@ migration `901_primaryinc_line_targets.sql`（fork-local 900番台 prefix、`sch
   `membership_updated_at`（最後に適用した join/leave の event.timestamp）など
 - `target_messages_log` — グループ用メッセージログ。`messages_log` は
   `friend_id NOT NULL` のため並列テーブルとして追加
+- `name_refreshed_at`（migration `902`）— group summary で表示名を取得した
+  最後の event.timestamp。message 受信時、最終取得から 7 日以上経過していれば
+  再取得して改名に追従する（毎メッセージでは叩かない throttle 付き）
+
+## 運用（運用開始前チェックリスト）
+
+### 課金カウントの実測（FOLLOWUPS 5c）
+
+グループ/複数人トークへの送信は「グループ内メンバー全員への配信」になるため、
+LINE の課金メッセージ数は **メンバー数分** カウントされる想定（1:1 friend への
+1 通と課金単位が異なる）。要件上の未決事項なので、本運用前に少人数の実グループで
+1 通送信し、LINE Official Account Manager の「メッセージ通数」実績で
+実際の課金通数を確認すること。
+
+手順:
+
+1. テスト用グループ（メンバー数が既知、例: 担当者3名）に公式アカウントを招待
+2. `/groups` 画面または `line targets send` で 1 通送信
+3. 翌日以降、LINE Official Account Manager → 分析 → メッセージ通数 で増分を確認
+4. 「送信 1 回あたりの課金通数 ≒ 送信時点のメンバー数」かを確認し、
+   想定と乖離があれば送信ポリシー（頻度・宛先）を見直す
+
+> グループ送信はブロードキャストに近いコスト特性になり得るため、
+> 大量配信の前に必ず実測する。
+
+### 既存グループの取り込み手順（FOLLOWUPS 5d）
+
+LINE API の制約により、**過去に発生したグループ会話をさかのぼって取り込むことは
+できない**。target は「公式アカウントの join イベント」または「グループ内での
+発言（message イベント）」を受信して初めて登録される。既に公式アカウントを
+招待済みのグループを取り込むには:
+
+1. 対象グループで **誰か 1 人に一言発言してもらう**（message イベントが発生し、
+   target が自動登録される。同時に group summary で表示名も取得される）
+2. `/groups` 画面に表示されたことを確認する
+3. 必要なら `line targets link-customer`（sales-harness）で顧客に紐付ける
+
+> 発言が発生するまで target は登録されない。運用開始時に対象グループの一覧を作り、
+> 各グループで発言を促す（またはこちらから一言送るために一度招待し直す）運用で
+> 取り込む。過去メッセージ自体は取り込めない（発言時点以降のみ記録される）。
