@@ -123,6 +123,12 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   が再集計されず NULL のまま残り得る
 - **会話履歴の older ページング**: 管理画面は最新 100 件のみ取得（それ以前は
   「未取得」表示）。複合カーソルはあるので UI の older ページングは backlog
+- **退出通知の表示面**: leave は `notifications` 行を作成するが、それを描画する
+  ダッシュボード通知一覧が web 側に未実装（`/notifications` は未返信 inbox）。行の
+  作成は正しく、通知一覧 UI（または能動配信）の実装は別タスクとして backlog
+- **同一 target への並行送信結果**: 送信結果は account+target row id をキーに
+  Map 保持する。同一 target へ離脱→再オープン→再送信を重ねると同一キーの後の
+  結果が前を上書きし得る（別 target 間の取りこぼしは解消済み）。稀なため backlog
 - **遅延失敗送信の下書き復元**: 送信中に target/account を切り替えると下書きは
   クリアされる。再オープン時に失敗/不確定通知は出るが本文は復元されない
 
