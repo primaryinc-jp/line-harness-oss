@@ -334,8 +334,12 @@ export default function GroupsPage() {
       if (outcome === 'failed') {
         setSendError(failMessage)
       } else if (outcome === 'unknown') {
+        // The push may have succeeded even though logging it failed, in which
+        // case the message was delivered to the whole group but will NOT appear
+        // in this view (no log row). Do not tell the operator to judge by the
+        // in-app refresh — direct them to verify in the actual LINE group.
         setRefreshNotice(
-          '送信結果を確認できませんでした。会話を再読み込みして反映を確認し、届いていない場合のみ再送してください。',
+          '送信結果を確認できませんでした。すでに配信されている可能性があります（この管理画面には反映されない場合があります）。実際のLINEグループで着信を確認し、届いていない場合のみ再送してください。',
         )
       } else if (outcome === 'sent') {
         // Only clear the box if the operator hasn't started a new message since.
@@ -351,8 +355,10 @@ export default function GroupsPage() {
         if (reqId !== detailReqRef.current) return
         setDetail(d)
         setMessages(msgs)
-        // Reflect the new last_message_at in the list: move the row to the top
-        // (list is ordered by activity DESC) with the refreshed timestamp.
+        // Reflect the refreshed target in the list. Only promote it to the top
+        // (list is ordered by activity DESC) if last_message_at actually
+        // advanced — for an unknown outcome that never reached the Worker the
+        // timestamp is unchanged, and reordering would contradict the server.
         if (d) {
           setTargets((prev) => {
             const idx = prev.findIndex((t) => t.id === d.id)
@@ -363,6 +369,15 @@ export default function GroupsPage() {
               isActive: d.isActive,
               metadata: d.metadata,
               lastMessageAt: d.lastMessageAt,
+            }
+            const prevAt = prev[idx].lastMessageAt
+            const advanced =
+              !!d.lastMessageAt &&
+              (!prevAt || new Date(d.lastMessageAt).getTime() > new Date(prevAt).getTime())
+            if (!advanced) {
+              const copy = [...prev]
+              copy[idx] = merged
+              return copy
             }
             return [merged, ...prev.filter((_, i) => i !== idx)]
           })
