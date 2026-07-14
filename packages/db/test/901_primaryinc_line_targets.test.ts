@@ -359,6 +359,45 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(bound.items.map((t) => t.line_target_id)).toEqual(['Cbound']);
   });
 
+  it('adopts NULL-era history when a legacy target is first bound to an account', async () => {
+    const d1 = asD1(db);
+    // Legacy: unbound target with unbound (NULL) history.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'レガシー履歴', lineMessageId: 'l1',
+      senderLineUserId: 'U-legacy', senderDisplayName: 'レガシー人',
+    });
+
+    // The channel is registered as account A — re-upsert binds the target.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+
+    // The pre-binding history must now be visible under account A's scope.
+    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
+    expect(aMsgs.map((m) => m.content)).toEqual(['レガシー履歴']);
+    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
+    expect(aParts.map((p) => p.displayName)).toEqual(['レガシー人']);
+  });
+
+  it('does not merge a true A→B hand-off into the new owner', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代', lineMessageId: 'a1', lineAccountId: 'acc-A', senderLineUserId: 'U-a',
+    });
+    // Account B joins the same group id — ownership hands over.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代', lineMessageId: 'b1', lineAccountId: 'acc-B', senderLineUserId: 'U-b',
+    });
+
+    // The A-era message must NOT be adopted into B's scope.
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).map((m) => m.content)).toEqual(['B時代']);
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
+  });
+
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {
     const d1 = asD1(db);
     const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });

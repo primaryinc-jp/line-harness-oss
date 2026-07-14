@@ -159,6 +159,8 @@ export async function upsertLineTarget(
   input: UpsertLineTargetInput,
 ): Promise<LineTarget> {
   const now = jstNow();
+  // Capture the prior owner so we can detect a first-time NULL→account binding.
+  const prior = await getLineTargetByLineTargetId(db, input.lineTargetId);
   await db
     .prepare(
       `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, created_at, updated_at)
@@ -181,7 +183,25 @@ export async function upsertLineTarget(
     )
     .run();
 
-  return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
+  const row = (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
+
+  // First bind of a legacy (unbound) target to an account: adopt its NULL-era
+  // history so the account-scoped reads (which filter by the target's current
+  // owner) don't hide messages logged before the channel became an account.
+  // Only NULL rows are touched, so a genuine A→B hand-off never merges the
+  // previous account's messages into the new owner.
+  if (
+    input.lineAccountId &&
+    (prior == null || prior.line_account_id == null) &&
+    row.line_account_id === input.lineAccountId
+  ) {
+    await db
+      .prepare(`UPDATE target_messages_log SET line_account_id = ? WHERE target_id = ? AND line_account_id IS NULL`)
+      .bind(input.lineAccountId, row.id)
+      .run();
+  }
+
+  return row;
 }
 
 export interface SetLineTargetActiveInput {
