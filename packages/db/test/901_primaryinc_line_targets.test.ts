@@ -421,10 +421,16 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
   });
 
-  it('clears metadata when a membership event transfers ownership to a different account', async () => {
+  it('clears metadata and last_message_at when a membership event transfers ownership', async () => {
     const d1 = asD1(db);
     const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
     await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-A', salesDealPageId: 'deal-A' }));
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代', lineMessageId: 'a1', lineAccountId: 'acc-A', occurredAt: Date.UTC(2026, 6, 10, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).not.toBeNull();
+
     // B takes over via a newer membership event.
     await setLineTargetActive(d1, {
       targetType: 'group', lineTargetId: 'Cg1', isActive: true,
@@ -432,8 +438,26 @@ describe('901_primaryinc_line_targets.sql', () => {
     });
     const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
     expect(row.line_account_id).toBe('acc-B');
-    // A's CRM associations must not carry into B's scope.
+    // Neither A's CRM associations nor A's activity time carry into B's scope.
     expect(JSON.parse(row.metadata || '{}')).toEqual({});
+    expect(row.last_message_at).toBeNull();
+  });
+
+  it('a message from a non-current owner does not advance last_message_at', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    // A stale message tagged with the previous account A must not surface as B's activity.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代の残り', lineMessageId: 'a1', lineAccountId: 'acc-A', occurredAt: Date.UTC(2026, 6, 10, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).toBeNull();
+    // A message from the current owner B does advance it.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代', lineMessageId: 'b1', lineAccountId: 'acc-B', occurredAt: Date.UTC(2026, 6, 11, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).not.toBeNull();
   });
 
   it('keeps metadata on a same-owner membership refresh (no spurious clear)', async () => {

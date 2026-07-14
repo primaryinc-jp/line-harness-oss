@@ -224,9 +224,10 @@ export default function GroupsPage() {
   useEffect(() => {
     detailReqRef.current++ // invalidate any in-flight detail load
     openedTargetRef.current = null
-    // Drop any pending send outcome on a scope change; it is re-evaluated by
-    // key, but clearing keeps state tidy across account switches.
-    setPendingSend(null)
+    // NB: do NOT clear pendingSend here. A send that completes after the
+    // operator switches accounts (and back) must still surface when its exact
+    // account+target conversation is reopened; the surfacing effect consumes it
+    // only on a key match, so an unrelated scope never sees it.
     setSelectedId(null)
     setDetail(null)
     setMessages([])

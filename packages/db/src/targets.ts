@@ -245,6 +245,16 @@ export async function setLineTargetActive(
                 AND excluded.line_account_id IS NOT NULL
                 AND excluded.line_account_id <> line_targets.line_account_id
            THEN '{}' ELSE line_targets.metadata END,
+         -- Same handoff condition: the previous owner's last_message_at is not
+         -- the new owner's activity (whose scoped thread is empty until it
+         -- receives a message), so reset it or the list would sort/label the
+         -- target by an unrelated timestamp.
+         last_message_at = CASE
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND line_targets.line_account_id IS NOT NULL
+                AND excluded.line_account_id IS NOT NULL
+                AND excluded.line_account_id <> line_targets.line_account_id
+           THEN NULL ELSE line_targets.last_message_at END,
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -359,18 +369,22 @@ export async function logTargetMessage(
     if (existing) return existing.id;
   }
 
-  // last_message_at is monotonic: a delayed/redelivered old message must not
-  // surface the target as having new activity (timestamps share the same JST
-  // ISO format, so string MAX is chronological).
+  // last_message_at is monotonic (a delayed/redelivered old message must not
+  // surface new activity — timestamps share the JST ISO format so string
+  // compare is chronological) AND owner-scoped: a message whose account is not
+  // the target's current owner (e.g. a stale event from a previous owner after
+  // a hand-off) must not advance the aggregate the new owner sorts/labels by.
+  // `IS` is null-safe, so a legacy (NULL-owner) target matches a NULL account.
   await db
     .prepare(
       `UPDATE line_targets
        SET last_message_at = CASE
-             WHEN last_message_at IS NULL OR last_message_at < ? THEN ? ELSE last_message_at END,
+             WHEN line_account_id IS ? AND (last_message_at IS NULL OR last_message_at < ?)
+             THEN ? ELSE last_message_at END,
            updated_at = ?
        WHERE id = ?`,
     )
-    .bind(createdAt, createdAt, now, input.targetId)
+    .bind(input.lineAccountId ?? null, createdAt, createdAt, now, input.targetId)
     .run();
   return id;
 }
