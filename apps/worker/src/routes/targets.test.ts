@@ -82,6 +82,15 @@ beforeEach(() => {
   dbMocks.jstNow.mockReturnValue('2026-07-06T12:00:00.000');
   // Staff resolution used by resolveMessageSender (default: send as self)
   dbMocks.getStaffById.mockResolvedValue({ id: 'test-staff', name: 'テスト', is_active: 1, icon_url: null });
+  // Default: the owning account exists (reads/sends check this to keep orphaned
+  // deleted-account targets invisible). clearAllMocks keeps implementations, so
+  // resetting here stops an orphaned-owner test's null from leaking forward.
+  dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+  // Default: metadata update succeeds, returning the row it wrote (RETURNING).
+  // Tests that exercise the ownership-mismatch path override with null.
+  dbMocks.updateLineTargetMetadata.mockImplementation(
+    async (_db: unknown, _id: string, metadataJson: string) => ({ ...groupTarget, metadata: metadataJson }),
+  );
 });
 
 describe('GET /api/targets', () => {
@@ -120,6 +129,28 @@ describe('GET /api/targets', () => {
         salesDealPageId: 'deal-9',
       },
     }));
+  });
+
+  test('?lineAccountId= (empty) requests the unbound (legacy) scope', async () => {
+    dbMocks.listLineTargets.mockResolvedValue({ items: [], total: 0 });
+    const app = setupApp();
+    const res = await app.request('/api/targets?lineAccountId=');
+    expect(res.status).toBe(200);
+    expect(dbMocks.listLineTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ lineAccountId: null }),
+    );
+  });
+
+  test('absent lineAccountId means all accounts (undefined scope)', async () => {
+    dbMocks.listLineTargets.mockResolvedValue({ items: [], total: 0 });
+    const app = setupApp();
+    const res = await app.request('/api/targets?type=group');
+    expect(res.status).toBe(200);
+    expect(dbMocks.listLineTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ lineAccountId: undefined }),
+    );
   });
 
   test('rejects unsupported type', async () => {
@@ -183,6 +214,32 @@ describe('GET /api/targets/:targetType/:targetId', () => {
     const res = await app.request('/api/targets/room/Cabcdef0123456789');
     expect(res.status).toBe(404);
   });
+
+  test('409 when the ?lineAccountId assertion does not match the current owner', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-2');
+    expect(res.status).toBe(409);
+    expect(dbMocks.getTargetParticipants).not.toHaveBeenCalled();
+  });
+
+  test('scopes participants to the current owning account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getTargetParticipants.mockResolvedValue([]);
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    expect(dbMocks.getTargetParticipants).toHaveBeenCalledWith(expect.anything(), 'tgt-1', 'acc-1');
+  });
+
+  test('404 when the owning account was deleted (orphaned target is invisible)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineAccountById.mockResolvedValue(null); // acc-1 deleted → orphaned
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-1');
+    expect(res.status).toBe(404);
+    expect(dbMocks.getTargetParticipants).not.toHaveBeenCalled();
+  });
 });
 
 describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
@@ -221,6 +278,61 @@ describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
     });
     expect(res.status).toBe(404);
   });
+
+  test('409 when the conditional update matches no row (ownership changed under us)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    // Atomic guard: the conditional UPDATE + RETURNING matches no row.
+    dbMocks.updateLineTargetMetadata.mockResolvedValue(null);
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: 'acc-2' }),
+    });
+    expect(res.status).toBe(409);
+    // The assertion is applied in the same statement, not a stale pre-check.
+    expect(dbMocks.updateLineTargetMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.any(String),
+      { expectedAccountId: 'acc-2' },
+    );
+  });
+
+  test('empty-string body assertion matches an unbound (legacy) target', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.getLineTargetById.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: '' }),
+    });
+    expect(res.status).toBe(200);
+    // '' normalizes to the unbound (null) assertion, matching a NULL owner.
+    expect(dbMocks.updateLineTargetMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.any(String),
+      { expectedAccountId: null },
+    );
+  });
+
+  test('lineAccountId assertion is not merged into stored metadata', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineTargetById.mockResolvedValue(groupTarget);
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: 'acc-1' }),
+    });
+    expect(res.status).toBe(200);
+    const [, , mergedJson] = dbMocks.updateLineTargetMetadata.mock.calls[0];
+    const merged = JSON.parse(mergedJson as string) as Record<string, unknown>;
+    expect(merged.lineAccountId).toBeUndefined(); // reserved key, never stored
+    expect(merged.salesDealPageId).toBe('deal-9');
+  });
 });
 
 describe('GET /api/conversations/:targetType/:targetId', () => {
@@ -258,6 +370,36 @@ describe('GET /api/conversations/:targetType/:targetId', () => {
     const app = setupApp();
     const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=-1');
     expect(res.status).toBe(400);
+    expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
+  });
+
+  test('409 when the ?lineAccountId assertion does not match the current owner', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?lineAccountId=acc-2');
+    expect(res.status).toBe(409);
+    expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
+  });
+
+  test('scopes history to the current owning account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getTargetMessages.mockResolvedValue([]);
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=50&lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    expect(dbMocks.getTargetMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.objectContaining({ lineAccountId: 'acc-1' }),
+    );
+  });
+
+  test('404 when the owning account was deleted (orphaned target has no readable history)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineAccountById.mockResolvedValue(null); // acc-1 deleted → orphaned
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=50&lineAccountId=acc-1');
+    expect(res.status).toBe(404);
     expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
   });
 });
@@ -376,5 +518,87 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
+  });
+
+  test('account-binding: rejects with 409 when the target now belongs to another account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owned by acc-1
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Caller believed it was scoped to acc-2, but ownership is acc-1 now.
+      body: JSON.stringify({ content: 'hello', lineAccountId: 'acc-2' }),
+    });
+    expect(res.status).toBe(409);
+    expect(pushMessage).not.toHaveBeenCalled();
+  });
+
+  test('account-binding: allows the send when the asserted account matches', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owned by acc-1
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello', lineAccountId: 'acc-1' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('account-binding: a null assertion matches an unbound (legacy) target', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello', lineAccountId: null }),
+    });
+    expect(res.status).toBe(200);
+    // Unbound target falls back to the environment token.
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('account-binding: empty-string body assertion matches an unbound target (no 409)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', lineAccountId: '' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('orphaned target (owner account deleted) is rejected, not sent via env token', async () => {
+    // Target still points at a now-deleted account id.
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: 'acc-deleted' });
+    dbMocks.getLineAccountById.mockResolvedValue(null); // account no longer exists
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi' }),
+    });
+    expect(res.status).toBe(409);
+    expect(pushMessage).not.toHaveBeenCalled(); // never falls back to env token
+  });
+
+  test('account-binding: omitting the assertion preserves back-compat (no guard)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pushMessage).toHaveBeenCalled();
   });
 });

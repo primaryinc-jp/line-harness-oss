@@ -197,6 +197,16 @@ export async function deleteLineAccount(
   db: D1Database,
   id: string,
 ): Promise<void> {
+  // Deleting the account row leaves its group/room targets and history pointing
+  // at the (now dangling) id. That is deliberate: such rows are ORPHANED, not
+  // legacy — they never match any account-scoped read nor the legacy unbound
+  // (NULL) scope, so they simply become invisible. We intentionally do NOT null
+  // them: turning a deleted account's rows into NULL would (a) make them appear
+  // in the legacy env-token scope and fall back to LINE_CHANNEL_ACCESS_TOKEN,
+  // and (b) let a different account joining the same group id adopt the prior
+  // account's history. Safely re-attaching an orphaned target to a recreated
+  // same-channel account requires a stable channel identity — tracked as a
+  // backlog item (see docs/GROUP_TARGETS.md "Known limitations").
   await db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id).run();
 }
 

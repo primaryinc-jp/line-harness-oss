@@ -68,4 +68,113 @@ describe('TargetsResource', () => {
       trackLinks: false,
     })
   })
+
+  it('get() asserts the default account so a moved target is rejected server-side', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.get('group', 'Cg1')
+    expect(http.get).toHaveBeenCalledWith('/api/targets/group/Cg1?lineAccountId=acc_default')
+  })
+
+  it('getConversation() asserts the default account', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: { target: {}, messages: [] } }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.getConversation('group', 'Cg1', { limit: 30 })
+    expect(http.get).toHaveBeenCalledWith('/api/conversations/group/Cg1?limit=30&lineAccountId=acc_default')
+  })
+
+  it('sendMessage() asserts the default account in the body', async () => {
+    const http = mockHttp({ post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.sendMessage('group', 'Cg1', 'hello')
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'hello',
+      lineAccountId: 'acc_default',
+    })
+  })
+
+  it('explicit lineAccountId overrides the default on reads and sends', async () => {
+    const http = mockHttp({
+      get: vi.fn().mockResolvedValue({ success: true, data: {} }),
+      post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }),
+    })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.get('group', 'Cg1', { lineAccountId: 'acc_explicit' })
+    expect(http.get).toHaveBeenCalledWith('/api/targets/group/Cg1?lineAccountId=acc_explicit')
+    await resource.sendMessage('group', 'Cg1', 'hi', 'text', undefined, undefined, { lineAccountId: 'acc_explicit' })
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'hi',
+      lineAccountId: 'acc_explicit',
+    })
+  })
+
+  it('setMetadata() asserts the default account as a reserved body key', async () => {
+    const http = mockHttp({ put: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'deal-9' })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', {
+      salesDealPageId: 'deal-9',
+      lineAccountId: 'acc_default',
+    })
+  })
+
+  it('setMetadata() omits the assertion when unscoped (back-compat)', async () => {
+    const http = mockHttp({ put: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    const resource = new TargetsResource(http)
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'deal-9' })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', { salesDealPageId: 'deal-9' })
+  })
+
+  it('explicit empty string selects the unbound (legacy) scope on reads', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    // Even with a default account configured, an explicit '' must win.
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.get('group', 'Cg1', { lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/targets/group/Cg1?lineAccountId=')
+    await resource.getConversation('group', 'Cg1', { lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/conversations/group/Cg1?lineAccountId=')
+  })
+
+  it('explicit empty/null asserts unbound as null in send/metadata bodies', async () => {
+    const http = mockHttp({
+      post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }),
+      put: vi.fn().mockResolvedValue({ success: true, data: {} }),
+    })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.sendMessage('group', 'Cg1', 'hi', 'text', undefined, undefined, { lineAccountId: '' })
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'hi',
+      lineAccountId: null,
+    })
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'd' }, { lineAccountId: null })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', {
+      salesDealPageId: 'd',
+      lineAccountId: null,
+    })
+  })
+
+  it('list() explicit empty string selects the unbound scope', async () => {
+    const http = mockHttp({ get: vi.fn().mockResolvedValue({ success: true, data: emptyList }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.list({ lineAccountId: '' })
+    expect(http.get).toHaveBeenCalledWith('/api/targets?lineAccountId=')
+  })
+
+  it('no default account: reads/sends omit the assertion (back-compat)', async () => {
+    const http = mockHttp({
+      get: vi.fn().mockResolvedValue({ success: true, data: {} }),
+      post: vi.fn().mockResolvedValue({ success: true, data: { messageId: 'm1' } }),
+    })
+    const resource = new TargetsResource(http)
+    await resource.get('group', 'Cg1')
+    expect(http.get).toHaveBeenCalledWith('/api/targets/group/Cg1')
+    await resource.sendMessage('group', 'Cg1', 'hi')
+    expect(http.post).toHaveBeenCalledWith('/api/targets/group/Cg1/messages', {
+      messageType: 'text',
+      content: 'hi',
+    })
+  })
 })

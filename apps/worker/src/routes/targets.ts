@@ -83,6 +83,36 @@ function serializeTargetMessage(m: TargetMessage) {
   };
 }
 
+/**
+ * Optional account-binding assertion for reads. When the caller states which
+ * account it expects to own this target (`?lineAccountId=`), reject if
+ * ownership has since changed (e.g. account A left and B joined the same group
+ * id) so one account's UI never renders another account's thread. Omitted or
+ * empty means no assertion (back-compat for SDK/MCP callers).
+ */
+function assertTargetAccount(requested: string | undefined, owner: string | null): string | null {
+  // Absent = no assertion (back-compat). Empty asserts an unbound (legacy)
+  // target; a value asserts that specific account.
+  if (requested === undefined) return null;
+  const expected = requested === '' ? null : requested;
+  if (expected !== owner) {
+    return 'Target ownership changed for this account; reload before viewing';
+  }
+  return null;
+}
+
+/**
+ * Parse a body-level `lineAccountId` account-binding assertion. `undefined`
+ * (key absent) = no assertion; `''` or `null` = the unbound (legacy) scope;
+ * any other value = that account. Normalizing `''` to null matches the query
+ * contract in GROUP_TARGETS.md so direct-API callers behave like the SDK.
+ */
+function bodyAccountAssertion(raw: unknown): { asserted: boolean; expected: string | null } {
+  if (raw === undefined) return { asserted: false, expected: null };
+  if (raw === '' || raw === null) return { asserted: true, expected: null };
+  return { asserted: true, expected: String(raw) };
+}
+
 /** Resolve :targetType/:targetId (harness uuid or LINE group/room id). */
 async function resolveTarget(
   db: D1Database,
@@ -93,6 +123,20 @@ async function resolveTarget(
   const target = byLineId ?? (await getLineTargetById(db, targetId));
   if (!target || target.target_type !== targetType) return null;
   return target;
+}
+
+/**
+ * A target whose owning account row was deleted is "orphaned" and, per the
+ * isolation contract (docs/GROUP_TARGETS.md), inaccessible in every scope — it
+ * must not fall back to another account or the env token. The send path already
+ * refuses it; reads/writes must too, otherwise a client still configured with
+ * the deleted account id could keep viewing or mutating the orphan. Returns
+ * true when the target has a non-null owner that no longer exists.
+ */
+async function ownerAccountMissing(db: D1Database, target: LineTarget): Promise<boolean> {
+  if (!target.line_account_id) return false;
+  const { getLineAccountById } = await import('@line-crm/db');
+  return (await getLineAccountById(db, target.line_account_id)) === null;
 }
 
 // GET /api/targets?type=group|room&lineAccountId=&includeInactive=&limit=&offset=
@@ -120,9 +164,13 @@ targets.get('/api/targets', async (c) => {
       }
     }
 
+    // `?lineAccountId=` distinguishes three scopes: absent = all accounts,
+    // a value = that account, empty = unbound (legacy env-token) targets only.
+    const laRaw = c.req.query('lineAccountId');
+    const listAccountScope = laRaw === undefined ? undefined : laRaw === '' ? null : laRaw;
     const { items, total } = await listLineTargets(c.env.DB, {
       targetType: typeParam as TargetType | undefined,
-      lineAccountId: c.req.query('lineAccountId') || undefined,
+      lineAccountId: listAccountScope,
       includeInactive: c.req.query('includeInactive') === 'true',
       metadataFilters,
       limit,
@@ -155,10 +203,18 @@ targets.get('/api/targets/:targetType/:targetId', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(c.env.DB, target)) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+    const ownershipError = assertTargetAccount(c.req.query('lineAccountId'), target.line_account_id);
+    if (ownershipError) return c.json({ success: false, error: ownershipError }, 409);
 
     // Participants are derived from who has spoken (LINE only exposes full
     // member lists to verified accounts), so this is best-effort by design.
-    const participants = await getTargetParticipants(c.env.DB, target.id);
+    // Scope to the current owning account so speakers from a previous owner
+    // (before a group changed hands) don't appear in this account's view.
+    const participants = await getTargetParticipants(c.env.DB, target.id, target.line_account_id);
 
     return c.json({
       success: true,
@@ -186,14 +242,35 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(db, target)) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
 
     const body = await c.req.json<Record<string, unknown>>();
+    // `lineAccountId` is a reserved account-binding assertion, not a metadata
+    // field — pull it out so it is never merged into stored metadata.
+    const { lineAccountId: rawAssertion, ...fields } = body;
+    const { asserted, expected } = bodyAccountAssertion(rawAssertion);
     const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
-    const merged = { ...existing, ...body };
-    await updateLineTargetMetadata(db, target.id, JSON.stringify(merged));
+    const merged = { ...existing, ...fields };
+    // Apply the ownership assertion in the same UPDATE statement, and return the
+    // row it produced (RETURNING) so the response can't reflect a concurrent
+    // ownership transfer that happened after the initial read.
+    const updated = await updateLineTargetMetadata(
+      db,
+      target.id,
+      JSON.stringify(merged),
+      asserted ? { expectedAccountId: expected } : undefined,
+    );
+    if (!updated) {
+      return c.json(
+        { success: false, error: 'Target ownership changed for this account; reload before writing' },
+        409,
+      );
+    }
 
-    const updated = await getLineTargetById(db, target.id);
-    return c.json({ success: true, data: serializeTarget(updated!) });
+    return c.json({ success: true, data: serializeTarget(updated) });
   } catch (err) {
     console.error('PUT /api/targets/:targetType/:targetId/metadata error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -214,17 +291,32 @@ targets.get('/api/conversations/:targetType/:targetId', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(db, target)) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
 
     const limit = intParam(c.req.query('limit'), 50, 1, 200);
     if (limit === null) {
       return c.json({ success: false, error: 'limit must be an integer 1..200' }, 400);
     }
+    const ownershipError = assertTargetAccount(c.req.query('lineAccountId'), target.line_account_id);
+    if (ownershipError) return c.json({ success: false, error: ownershipError }, 409);
+
     const before = c.req.query('before') ?? null;
     // beforeId makes the cursor composite (created_at, id): created_at is the
     // LINE event time, so ties can straddle a page boundary. Pass the id of
     // the oldest message from the previous page together with its createdAt.
     const beforeId = c.req.query('beforeId') ?? null;
-    const messages = await getTargetMessages(db, target.id, { limit, before, beforeId });
+    // Scope history to the current owning account: a group that changed hands
+    // accumulates rows tagged with each era's account, and only the current
+    // owner's rows belong in this view.
+    const messages = await getTargetMessages(db, target.id, {
+      limit,
+      before,
+      beforeId,
+      lineAccountId: target.line_account_id,
+    });
 
     return c.json({
       success: true,
@@ -251,6 +343,10 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
       content: string;
       altText?: string;
       trackLinks?: boolean;
+      // Optional account-binding assertion: the account the caller believes
+      // owns this target. Omitted by SDK/MCP callers (guard skipped); the admin
+      // UI sends its scoped account so a mid-session ownership change is caught.
+      lineAccountId?: string | null;
     } & SenderSelection>();
     if (!body.content) {
       return c.json({ success: false, error: 'content is required' }, 400);
@@ -261,17 +357,39 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    // Account-binding guard: if the caller states which account it expects to
+    // own this target, reject when ownership has since changed (e.g. account A
+    // left the group and account B joined the same group id) so the send can't
+    // silently go out under a different account's token. Absent = no assertion
+    // (back-compat); '' or null asserts an unbound (legacy) target.
+    const sendAssertion = bodyAccountAssertion(body.lineAccountId);
+    if (sendAssertion.asserted && (target.line_account_id ?? null) !== sendAssertion.expected) {
+      return c.json(
+        { success: false, error: 'Target ownership changed for this account; reload before sending' },
+        409,
+      );
+    }
     if (!target.is_active) {
       return c.json({ success: false, error: 'Target is inactive (bot has left the group/room)' }, 409);
     }
 
     const { LineClient } = await import('@line-crm/line-sdk');
-    // Resolve access token from the target's account (multi-account support)
+    // Resolve access token from the target's account (multi-account support).
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
     if (target.line_account_id) {
       const { getLineAccountById } = await import('@line-crm/db');
       const account = await getLineAccountById(db, target.line_account_id);
-      if (account) accessToken = account.channel_access_token;
+      if (!account) {
+        // The owning account was deleted — this target is orphaned. Do NOT fall
+        // back to the environment token (that would push from an unrelated
+        // account, breaking the isolation guarantee). Only genuinely unbound
+        // (line_account_id IS NULL) legacy targets use the env token.
+        return c.json(
+          { success: false, error: 'Target owner account no longer exists; cannot send' },
+          409,
+        );
+      }
+      accessToken = account.channel_access_token;
     }
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';

@@ -3,7 +3,8 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets, getLineTargetByLineTargetId, updateLineTargetMetadata } from '../src/targets.js';
+import { deleteLineAccount } from '../src/line-accounts.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -31,6 +32,8 @@ function loadDb(): Database.Database {
  */
 function asD1(db: Database.Database): D1Database {
   const wrap = (sql: string, binds: unknown[] = []) => ({
+    _sql: sql,
+    _binds: binds,
     bind: (...args: unknown[]) => wrap(sql, args),
     run: async () => {
       const info = db.prepare(sql).run(...(binds as never[]));
@@ -39,7 +42,19 @@ function asD1(db: Database.Database): D1Database {
     first: async () => db.prepare(sql).get(...(binds as never[])) ?? null,
     all: async () => ({ results: db.prepare(sql).all(...(binds as never[])) }),
   });
-  return { prepare: (sql: string) => wrap(sql) } as unknown as D1Database;
+  return {
+    prepare: (sql: string) => wrap(sql),
+    // Atomic batch (mirrors D1.batch): run all statements in one transaction.
+    batch: async (stmts: Array<{ _sql: string; _binds: unknown[] }>) => {
+      const tx = db.transaction((items: Array<{ _sql: string; _binds: unknown[] }>) =>
+        items.map((it) => {
+          const info = db.prepare(it._sql).run(...(it._binds as never[]));
+          return { meta: { changes: info.changes } };
+        }),
+      );
+      return tx(stmts);
+    },
+  } as unknown as D1Database;
 }
 
 describe('901_primaryinc_line_targets.sql', () => {
@@ -47,6 +62,18 @@ describe('901_primaryinc_line_targets.sql', () => {
 
   beforeEach(() => {
     db = loadDb();
+    // Seed the accounts the tests bind targets to. In production a target only
+    // ever binds to an existing account row, and listLineTargets now excludes
+    // orphaned (deleted-owner) rows, so the owning accounts must exist for a
+    // bound target to appear in a list. Tests that simulate deletion remove the
+    // row explicitly (see the orphan test).
+    const seedAccount = db.prepare(
+      `INSERT INTO line_accounts (id, channel_id, name, channel_access_token, channel_secret)
+       VALUES (?, ?, ?, 'tok', 'sec')`,
+    );
+    for (const id of ['acc-1', 'acc-A', 'acc-B', 'acc-old', 'acc-X']) {
+      seedAccount.run(id, `ch-${id}`, id);
+    }
   });
 
   it('creates line_targets with the expected columns', () => {
@@ -66,6 +93,7 @@ describe('901_primaryinc_line_targets.sql', () => {
         'metadata',
         'last_message_at',
         'membership_updated_at',
+        'name_refreshed_at',
         'created_at',
         'updated_at',
       ].sort(),
@@ -286,6 +314,271 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(all.map((m) => m.content).sort()).toEqual(['m0', 'm1', 'm2', 'm3']);
     // Deterministic order: ties resolved by id DESC, older message last
     expect(all[3].content).toBe('m0');
+  });
+
+  it('scopes messages and participants by line_account_id (no cross-account leak after hand-off)', async () => {
+    const d1 = asD1(db);
+    // Same group id, but ownership handed from account A to account B over time.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    // Account A era: one incoming from a speaker only A ever saw.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代の発言', lineMessageId: 'a1', lineAccountId: 'acc-A',
+      senderLineUserId: 'U-oldspeaker', senderDisplayName: 'A時代の人',
+    });
+    // Account B era (current owner): one incoming from a different speaker.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代の発言', lineMessageId: 'b1', lineAccountId: 'acc-B',
+      senderLineUserId: 'U-newspeaker', senderDisplayName: 'B時代の人',
+    });
+
+    // Unscoped read still returns everything (back-compat).
+    expect(await getTargetMessages(d1, target.id)).toHaveLength(2);
+    // Explicit `undefined` must behave as "no filter", not bind undefined.
+    expect(await getTargetMessages(d1, target.id, { lineAccountId: undefined })).toHaveLength(2);
+    expect(await getTargetParticipants(d1, target.id, undefined)).toHaveLength(2);
+
+    // Scoped to the current owner (B): only B-era rows.
+    const bMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' });
+    expect(bMsgs.map((m) => m.content)).toEqual(['B時代の発言']);
+    const bParts = await getTargetParticipants(d1, target.id, 'acc-B');
+    expect(bParts.map((p) => p.displayName)).toEqual(['B時代の人']);
+
+    // Scoped to A: only A-era rows.
+    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
+    expect(aMsgs.map((m) => m.content)).toEqual(['A時代の発言']);
+    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
+    expect(aParts.map((p) => p.displayName)).toEqual(['A時代の人']);
+  });
+
+  it('scopes to unbound (NULL account) rows for legacy env-token installs', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'legacy', lineMessageId: 'l1', // no lineAccountId → NULL
+      senderLineUserId: 'U-legacy', senderDisplayName: 'レガシー',
+    });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'bound', lineMessageId: 'x1', lineAccountId: 'acc-X',
+      senderLineUserId: 'U-x', senderDisplayName: 'Xさん',
+    });
+    const nullMsgs = await getTargetMessages(d1, target.id, { lineAccountId: null });
+    expect(nullMsgs.map((m) => m.content)).toEqual(['legacy']);
+    const nullParts = await getTargetParticipants(d1, target.id, null);
+    expect(nullParts.map((p) => p.displayName)).toEqual(['レガシー']);
+  });
+
+  it('listLineTargets scopes by account: null = unbound only, undefined = all', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cbound', lineAccountId: 'acc-1' });
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cunbound' }); // no account → NULL
+
+    const all = await listLineTargets(d1, {});
+    expect(all.total).toBe(2);
+
+    // Legacy scope: only unbound targets, never a (possibly deleted) account's.
+    const unbound = await listLineTargets(d1, { lineAccountId: null });
+    expect(unbound.items.map((t) => t.line_target_id)).toEqual(['Cunbound']);
+
+    const bound = await listLineTargets(d1, { lineAccountId: 'acc-1' });
+    expect(bound.items.map((t) => t.line_target_id)).toEqual(['Cbound']);
+  });
+
+  it('does NOT adopt NULL-era history into an account (isolation over convenience)', async () => {
+    const d1 = asD1(db);
+    // Legacy: unbound target with unbound (NULL) history.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'レガシー履歴', lineMessageId: 'l1',
+      senderLineUserId: 'U-legacy', senderDisplayName: 'レガシー人',
+    });
+
+    // The target is bound to account A (first-bind: NULL → A).
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-A');
+
+    // The pre-binding NULL history is NOT re-labelled as A's. Auto-adopting it
+    // would let a different account joining the same group id read history from
+    // before it existed; safely re-attaching it needs a stable channel identity
+    // (backlog). The NULL history stays visible only under the unbound scope.
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).length).toBe(0);
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).map((m) => m.content)).toEqual([
+      'レガシー履歴',
+    ]);
+  });
+
+  it('does not merge a true A→B hand-off into the new owner', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代', lineMessageId: 'a1', lineAccountId: 'acc-A', senderLineUserId: 'U-a',
+    });
+    // Account B joins the same group id (membership event) — ownership hands over.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代', lineMessageId: 'b1', lineAccountId: 'acc-B', senderLineUserId: 'U-b',
+    });
+
+    // The A-era message must NOT be adopted into B's scope.
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).map((m) => m.content)).toEqual(['B時代']);
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
+  });
+
+  it('clears metadata and last_message_at when a membership event transfers ownership', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-A', salesDealPageId: 'deal-A' }));
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代', lineMessageId: 'a1', lineAccountId: 'acc-A', occurredAt: Date.UTC(2026, 6, 10, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).not.toBeNull();
+
+    // B takes over via a newer membership event.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(row.line_account_id).toBe('acc-B');
+    // Neither A's CRM associations nor A's activity time carry into B's scope.
+    expect(JSON.parse(row.metadata || '{}')).toEqual({});
+    expect(row.last_message_at).toBeNull();
+  });
+
+  it('a message from a non-current owner does not advance last_message_at', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    // A stale message tagged with the previous account A must not surface as B's activity.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'A時代の残り', lineMessageId: 'a1', lineAccountId: 'acc-A', occurredAt: Date.UTC(2026, 6, 10, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).toBeNull();
+    // A message from the current owner B does advance it.
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: 'B時代', lineMessageId: 'b1', lineAccountId: 'acc-B', occurredAt: Date.UTC(2026, 6, 11, 2, 0, 0),
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.last_message_at).not.toBeNull();
+  });
+
+  it('keeps metadata on a same-owner membership refresh (no spurious clear)', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-A' }));
+    // Same account, newer membership event (e.g. a re-join).
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(JSON.parse(row.metadata || '{}')).toEqual({ salesCustomerPageId: 'cust-A' });
+  });
+
+  it('ownership is monotonic: a stale prior-account event cannot flip the owner back', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    // B takes over via a newer membership event.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+
+    // A stale account-A message is redelivered — must NOT reassign ownership.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+
+    // A stale account-A join (older timestamp) is redelivered — still B.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+  });
+
+  it("a non-owner account's leave must not deactivate, transfer, or wipe the owner's target", async () => {
+    const d1 = asD1(db);
+    // Two bots share a group; B owns the target and links a customer.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-B' }));
+
+    // Account A (not the owner) leaves the shared group at a LATER timestamp.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    // B still owns it, it stays active (B's bot is still present), and B's CRM
+    // link is intact — A's leave changed nothing.
+    expect(row.line_account_id).toBe('acc-B');
+    expect(row.is_active).toBe(1);
+    expect(JSON.parse(row.metadata || '{}')).toEqual({ salesCustomerPageId: 'cust-B' });
+  });
+
+  it("the owner's own leave still deactivates its target", async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(row.is_active).toBe(0);
+    expect(row.line_account_id).toBe('acc-B');
+  });
+
+  it('account deletion orphans its targets/history — never legacy scope, never leaked', async () => {
+    // schema.sql (test harness) omits traffic_pools, whose FK cascade fires on
+    // line_accounts delete; disable FK enforcement here — production has the
+    // full schema.
+    db.exec('PRAGMA foreign_keys = OFF');
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-old' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: '旧アカウント時代', lineMessageId: 'o1', lineAccountId: 'acc-old', senderLineUserId: 'U1',
+    });
+
+    // Deleting the account leaves the target + history pinned to the dangling id.
+    await deleteLineAccount(d1, 'acc-old');
+    const orphan = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(orphan.line_account_id).toBe('acc-old'); // NOT nulled → not legacy scope
+
+    // Orphaned rows are invisible in EVERY list scope: legacy (NULL), an
+    // unscoped listing, and even a query still filtered by the dangling id.
+    expect((await listLineTargets(d1, { lineAccountId: null })).items).toEqual([]);
+    const unscoped = await listLineTargets(d1, {});
+    expect(unscoped.items).toEqual([]);
+    expect(unscoped.total).toBe(0);
+    expect((await listLineTargets(d1, { lineAccountId: 'acc-old' })).items).toEqual([]);
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).length).toBe(0);
+
+    // A different account B joining the same group id does not inherit the
+    // target (ownership is monotonic) and cannot see A's history.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-old');
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).length).toBe(0);
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {

@@ -10,6 +10,7 @@ const dbMocks = {
   upsertLineTarget: vi.fn(),
   setLineTargetActive: vi.fn(),
   logTargetMessage: vi.fn(),
+  createNotification: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -20,7 +21,11 @@ const db = {} as D1Database;
 const groupTarget = {
   id: 'tgt-1', target_type: 'group' as const, line_target_id: 'Cgroup1', display_name: '田中家グループ',
   picture_url: null, is_active: 1, line_account_id: null, metadata: null,
-  last_message_at: null, created_at: '', updated_at: '',
+  // Fresh far-future refresh time so message-event tests that don't care about
+  // name refresh don't spuriously trigger a summary fetch (event timestamps in
+  // those tests are small); name-refresh tests override this explicitly.
+  last_message_at: null, membership_updated_at: null, name_refreshed_at: 9_000_000_000_000,
+  created_at: '', updated_at: '',
 };
 
 function lineClient(overrides: Record<string, unknown> = {}): LineClient {
@@ -146,6 +151,60 @@ describe('handleTargetEvent', () => {
     expect(dbMocks.upsertLineTarget).not.toHaveBeenCalled();
   });
 
+  test('leave notifies sales when a customer-linked target is deactivated', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, is_active: 1, membership_updated_at: null,
+      metadata: JSON.stringify({ salesCustomerPageId: 'cust-1', salesDealPageId: 'deal-9' }),
+    });
+    await handleTargetEvent(
+      db, lineClient(),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
+      'token', 'acc-1',
+    );
+    expect(dbMocks.createNotification).toHaveBeenCalledTimes(1);
+    const arg = dbMocks.createNotification.mock.calls[0][1];
+    expect(arg.eventType).toBe('line_target_left');
+    expect(JSON.parse(arg.metadata).salesCustomerPageId).toBe('cust-1');
+  });
+
+  test('leave from a non-owner account does not notify (no cross-account CRM leak)', async () => {
+    // Target owned by acc-B with B's customer link; the leave webhook belongs to
+    // acc-A. A's leave must not emit a notification carrying B's customer id.
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, is_active: 1, membership_updated_at: null, line_account_id: 'acc-B',
+      metadata: JSON.stringify({ salesCustomerPageId: 'cust-B' }),
+    });
+    await handleTargetEvent(
+      db, lineClient(),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
+      'token', 'acc-A',
+    );
+    expect(dbMocks.createNotification).not.toHaveBeenCalled();
+  });
+
+  test('leave does not notify for an unlinked target', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, is_active: 1, metadata: null });
+    await handleTargetEvent(
+      db, lineClient(),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
+      'token', null,
+    );
+    expect(dbMocks.createNotification).not.toHaveBeenCalled();
+  });
+
+  test('redelivered leave (already inactive) does not re-notify', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, is_active: 0, membership_updated_at: 1751000000000,
+      metadata: JSON.stringify({ salesCustomerPageId: 'cust-1' }),
+    });
+    await handleTargetEvent(
+      db, lineClient(),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
+      'token', null,
+    );
+    expect(dbMocks.createNotification).not.toHaveBeenCalled();
+  });
+
   test('message events never call the membership update (cannot reactivate a left target)', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
     await handleTargetEvent(
@@ -159,5 +218,39 @@ describe('handleTargetEvent', () => {
     );
     expect(dbMocks.setLineTargetActive).not.toHaveBeenCalled();
     expect(dbMocks.logTargetMessage).toHaveBeenCalled();
+  });
+
+  test('message refreshes a stale group name and records the refresh time', async () => {
+    // Name last fetched long ago → refetch on this message.
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, display_name: '旧名', name_refreshed_at: 1000,
+    });
+    const getGroupSummary = vi.fn().mockResolvedValue({ groupId: 'Cgroup1', groupName: '新名', pictureUrl: null });
+    const now = 1000 + 8 * 24 * 60 * 60 * 1000; // 8 days later (> 7d threshold)
+    await handleTargetEvent(
+      db, lineClient({ getGroupSummary, getGroupMemberProfile: vi.fn().mockRejectedValue(new Error('n/a')) }),
+      event({ type: 'message', timestamp: now, source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' }, message: { id: 'm1', type: 'text', text: 'hi' } }),
+      'token', null,
+    );
+    expect(getGroupSummary).toHaveBeenCalledWith('Cgroup1');
+    const upsertArg = dbMocks.upsertLineTarget.mock.calls[0][1];
+    expect(upsertArg.displayName).toBe('新名');
+    expect(upsertArg.nameRefreshedAt).toBe(now);
+  });
+
+  test('message does not refetch a recently-refreshed group name', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, display_name: '田中家グループ', name_refreshed_at: 1_000_000,
+    });
+    const getGroupSummary = vi.fn();
+    const now = 1_000_000 + 60_000; // 1 minute later (< 7d threshold)
+    await handleTargetEvent(
+      db, lineClient({ getGroupSummary, getGroupMemberProfile: vi.fn().mockRejectedValue(new Error('n/a')) }),
+      event({ type: 'message', timestamp: now, source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' }, message: { id: 'm2', type: 'text', text: 'hi' } }),
+      'token', null,
+    );
+    expect(getGroupSummary).not.toHaveBeenCalled();
+    const upsertArg = dbMocks.upsertLineTarget.mock.calls[0][1];
+    expect(upsertArg.nameRefreshedAt).toBeUndefined();
   });
 });

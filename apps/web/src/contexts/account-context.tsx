@@ -32,6 +32,8 @@ interface AccountContextValue {
   setSelectedAccountId: (id: string) => void
   refreshAccounts: () => Promise<void>
   loading: boolean
+  /** True when the last account load failed (distinct from "no accounts"). */
+  error: boolean
 }
 
 const AccountContext = createContext<AccountContextValue | null>(null)
@@ -40,6 +42,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<AccountWithStats[]>([])
   const [selectedAccountId, setSelectedAccountIdState] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
 
   const setSelectedAccountId = useCallback((id: string) => {
     setSelectedAccountIdState(id)
@@ -51,6 +54,11 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const refreshAccounts = useCallback(async () => {
+    // Enter the loading state before clearing the error: otherwise a retry
+    // leaves accounts empty + loading false + error false, which consumers
+    // read as a legacy (accountless) install and query unscoped.
+    setLoading(true)
+    setError(false)
     try {
       const res = await api.lineAccounts.list()
       if (res.success && res.data.length > 0) {
@@ -75,7 +83,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         setSelectedAccountIdState(null)
       }
     } catch {
-      // Failed to load accounts
+      // Failed to load accounts — surface as an error state so consumers can
+      // distinguish an outage from a genuinely empty account set and retry.
+      setError(true)
     } finally {
       setLoading(false)
     }
@@ -89,7 +99,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   return (
     <AccountContext.Provider
-      value={{ accounts, selectedAccountId, selectedAccount, setSelectedAccountId, refreshAccounts, loading }}
+      value={{ accounts, selectedAccountId, selectedAccount, setSelectedAccountId, refreshAccounts, loading, error }}
     >
       {children}
     </AccountContext.Provider>

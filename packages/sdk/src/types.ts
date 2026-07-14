@@ -669,7 +669,8 @@ export interface TargetDetail extends Target {
 
 export interface TargetListParams {
   type?: TargetType
-  lineAccountId?: string
+  /** Account scope: a value = that account, '' = unbound (legacy) only, omitted = default/all. */
+  lineAccountId?: string | null
   includeInactive?: boolean
   /**
    * Exact-match metadata filters, sent as ?metadata.key=value. Use

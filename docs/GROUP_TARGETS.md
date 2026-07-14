@@ -63,10 +63,82 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   LINE アプリ内クリックはそのアカウントの LIFF 経由で解決される
 - bot が退出済み（`isActive=false`）の target への送信は 409
 - `limit` は 1..200 の整数、`offset` は 0 以上の整数。範囲外・非数値は 400
+- **アカウント所有権の表明（`lineAccountId`）**: read（詳細・会話）は query
+  `?lineAccountId=`、送信は body の `lineAccountId` で「この target を所有する
+  はずのアカウント」を表明できる。指定した値が現在の所有者と異なる場合は 409
+  （グループが別アカウントに移った後に古い target ID で読取り・送信するのを防ぐ）。
+  空文字は「未紐付け（`line_account_id IS NULL`＝env トークンのみのレガシー）」の
+  表明。省略した場合は表明なし＝後方互換（SDK/MCP で `LINE_HARNESS_ACCOUNT_ID`
+  未設定のとき）。会話・参加者は常に target の現在の所有者で絞り込まれるため、
+  所有者交代後に前アカウント時代のメッセージ・発言者が混ざることはない。
+  所有権は単調（monotonic）で、message/join は未紐付け target を初回バインド
+  するのみ、既にバインド済みの所有者を再割り当てしない。真の交代は新しい
+  membership イベント（join/leave の timestamp 比較）でのみ発生する
+- `list` の `lineAccountId` は 3 値: 省略＝全アカウント、値＝そのアカウント、
+  空文字＝未紐付け（レガシー）のみ
+
+## Known limitations（backlog: 安定チャネル識別子）
+
+アカウント所有権は line_accounts の内部 ID で表現される。この ID はアカウント
+削除で失われるため、以下は現状「安全側（漏洩なし）に倒す」挙動になっている。
+恒久対応には削除をまたいで安定するチャネル識別子（channel_id ベース）の導入が
+必要で、別タスクとして backlog 管理する。
+
+- **アカウント削除**: 削除された account の target と履歴は dangling ID のまま
+  残り「orphaned」になる（NULL 化しない）。orphaned は全 scope で不可視になり、
+  legacy（NULL）scope にも現れず env トークン送信にもフォールバックしない。
+  代償として、削除後にその target へは UI/API からアクセスできなくなる
+- **同一チャネル再作成**: 同じ LINE チャネルを新 account として作り直しても、
+  orphaned target は新 account へ自動再アタッチされない（安定識別子が必要）
+- **レガシー履歴の非移管**: env トークン（NULL 所有）運用から account 登録へ
+  移行しても、NULL 期の履歴は account scope へ移管されない（NULL scope でのみ
+  参照可能）。異なるチャネルの account が同一グループに同席するケースでの
+  誤移管（漏洩）を防ぐための保守的な仕様
+- **friend 側の未紐付け（NULL）scope 非対応**: `/api/targets` は
+  `lineAccountId=`（空文字）で `line_account_id IS NULL`（レガシー未紐付け）を
+  表明できるが、`/api/friends`・`/api/friends/count`・`/api/conversations`
+  （friend 系）は非空の値のみを account 述語に使う（空 = 全アカウント）。
+  この非対称のため sales-harness クライアントは friend 側の空文字 unbound scope を
+  fail-closed（エラー）にしている。friend routes への IS NULL 対応は backlog
+  （target と同じ 3 値 scope に揃える）
+
+### 残 P2 / backlog（安全側に倒し済み・磨き込みは backlog）
+
+所有権の分離・誤送信防止は担保済み（P1 なし）。以下は稀な UX 粗さ・並行性の隅で、
+いずれも安全側（漏洩なし・誤送信なし・データ破損なし）に倒したうえで backlog 管理する。
+
+- **read/write の任意所有権表明（後方互換）**: `lineAccountId` 省略時は所有権を
+  表明しない（後方互換：account 未設定の SDK/env トークン運用）。account を設定した
+  SDK/UI は常に表明するため、クロスアカウント漏洩は「複数 account 環境で、かつ
+  account 未設定の直接 API 呼び出し」という矛盾した構成でのみ起こり得る。厳格化
+  （全 read/write で表明必須）はレガシー運用を壊すため channel-identity 再設計と
+  合わせて backlog
+- **stale-owner の updated_at**: 交代後に旧 account の遅延メッセージが届くと
+  `updated_at` が更新され、`COALESCE(last_message_at, updated_at)` 並びで一時的に
+  上位に来ることがある（`last_message_at` 自体は所有者一致時のみ更新済み）
+- **並行 webhook の隅**: 同一 leave の同時再配信で通知が二重に出る可能性
+  （所有者一致・遷移時のみ発火まではガード済み。厳密な exactly-once は未対応）／
+  7 日 refresh の同時発火で summary API を重複コール／改名中に開始した古い refresh
+  応答が新名を上書きし得る／reorder された join 移管時に新所有者の `last_message_at`
+  が再集計されず NULL のまま残り得る
+- **会話履歴の older ページング**: 管理画面は最新 100 件のみ取得（それ以前は
+  「未取得」表示）。複合カーソルはあるので UI の older ページングは backlog
+- **退出通知の表示面**: leave は `notifications` 行を作成するが、それを描画する
+  ダッシュボード通知一覧が web 側に未実装（`/notifications` は未返信 inbox）。行の
+  作成は正しく、通知一覧 UI（または能動配信）の実装は別タスクとして backlog
+- **同一 target への並行送信結果**: 送信結果は account+target row id をキーに
+  Map 保持する。同一 target へ離脱→再オープン→再送信を重ねると同一キーの後の
+  結果が前を上書きし得る（別 target 間の取りこぼしは解消済み）。稀なため backlog
+- **遅延失敗送信の下書き復元**: 送信中に target/account を切り替えると下書きは
+  クリアされる。再オープン時に失敗/不確定通知は出るが本文は復元されない
 
 ## SDK / MCP
 
 - SDK: `client.targets.list / get / setMetadata / getConversation / sendMessage`
+  — `LINE_HARNESS_ACCOUNT_ID`（`config.lineAccountId`）を設定すると list だけで
+  なく get / getConversation / sendMessage も自動でその所有権を表明する
+  （移動後の target への読取り・送信は 409）。呼び出し時に `lineAccountId` を
+  明示すると上書きできる
 - MCP: `manage_targets`（list / get / set_metadata）、
   `get_conversation` と `send_message` は `targetType` + `targetId` 指定で
   グループ/ルームに対応
@@ -97,3 +169,43 @@ migration `901_primaryinc_line_targets.sql`（fork-local 900番台 prefix、`sch
   `membership_updated_at`（最後に適用した join/leave の event.timestamp）など
 - `target_messages_log` — グループ用メッセージログ。`messages_log` は
   `friend_id NOT NULL` のため並列テーブルとして追加
+- `name_refreshed_at`（migration `902`）— group summary で表示名を取得した
+  最後の event.timestamp。message 受信時、最終取得から 7 日以上経過していれば
+  再取得して改名に追従する（毎メッセージでは叩かない throttle 付き）
+
+## 運用（運用開始前チェックリスト）
+
+### 課金カウントの実測（FOLLOWUPS 5c）
+
+グループ/複数人トークへの送信は「グループ内メンバー全員への配信」になるため、
+LINE の課金メッセージ数は **メンバー数分** カウントされる想定（1:1 friend への
+1 通と課金単位が異なる）。要件上の未決事項なので、本運用前に少人数の実グループで
+1 通送信し、LINE Official Account Manager の「メッセージ通数」実績で
+実際の課金通数を確認すること。
+
+手順:
+
+1. テスト用グループ（メンバー数が既知、例: 担当者3名）に公式アカウントを招待
+2. `/groups` 画面または `line targets send` で 1 通送信
+3. 翌日以降、LINE Official Account Manager → 分析 → メッセージ通数 で増分を確認
+4. 「送信 1 回あたりの課金通数 ≒ 送信時点のメンバー数」かを確認し、
+   想定と乖離があれば送信ポリシー（頻度・宛先）を見直す
+
+> グループ送信はブロードキャストに近いコスト特性になり得るため、
+> 大量配信の前に必ず実測する。
+
+### 既存グループの取り込み手順（FOLLOWUPS 5d）
+
+LINE API の制約により、**過去に発生したグループ会話をさかのぼって取り込むことは
+できない**。target は「公式アカウントの join イベント」または「グループ内での
+発言（message イベント）」を受信して初めて登録される。既に公式アカウントを
+招待済みのグループを取り込むには:
+
+1. 対象グループで **誰か 1 人に一言発言してもらう**（message イベントが発生し、
+   target が自動登録される。同時に group summary で表示名も取得される）
+2. `/groups` 画面に表示されたことを確認する
+3. 必要なら `line targets link-customer`（sales-harness）で顧客に紐付ける
+
+> 発言が発生するまで target は登録されない。運用開始時に対象グループの一覧を作り、
+> 各グループで発言を促す（またはこちらから一言送るために一度招待し直す）運用で
+> 取り込む。過去メッセージ自体は取り込めない（発言時点以降のみ記録される）。

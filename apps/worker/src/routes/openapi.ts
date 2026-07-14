@@ -179,7 +179,7 @@ const spec = {
         summary: 'グループ/ルーム target 一覧取得',
         parameters: [
           { name: 'type', in: 'query', schema: { type: 'string', enum: ['group', 'room'] } },
-          { name: 'lineAccountId', in: 'query', schema: { type: 'string' } },
+          { name: 'lineAccountId', in: 'query', schema: { type: 'string' }, description: 'アカウントscope: 省略=全アカウント、値=そのアカウント、空文字=未紐付け(line_account_id IS NULL, レガシー)のみ' },
           { name: 'includeInactive', in: 'query', schema: { type: 'boolean', default: false } },
           { name: 'metadata.{key}', in: 'query', schema: { type: 'string' }, description: 'metadata の exact-match フィルタ（例: metadata.salesCustomerPageId=xxx で顧客からの逆引き）' },
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
@@ -195,8 +195,9 @@ const spec = {
         parameters: [
           { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
           { name: 'targetId', in: 'path', required: true, schema: { type: 'string' }, description: 'Harness ID または LINE groupId/roomId' },
+          { name: 'lineAccountId', in: 'query', schema: { type: 'string' }, description: 'アカウント所有権の表明。現在の所有者と不一致なら 409。空文字=未紐付け(レガシー)の表明、省略=表明なし' },
         ],
-        responses: { '200': { description: 'Target detail' }, '404': { description: 'Not found' } },
+        responses: { '200': { description: 'Target detail' }, '404': { description: 'Not found' }, '409': { description: '所有アカウントが変わっている（reload が必要）' } },
       },
     },
     '/api/targets/{targetType}/{targetId}/metadata': {
@@ -207,8 +208,20 @@ const spec = {
           { name: 'targetType', in: 'path', required: true, schema: { type: 'string', enum: ['group', 'room'] } },
           { name: 'targetId', in: 'path', required: true, schema: { type: 'string' } },
         ],
-        requestBody: { content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
-        responses: { '200': { description: 'Updated target' }, '404': { description: 'Not found' } },
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  lineAccountId: { type: 'string', nullable: true, description: '予約キー: アカウント所有権の表明（metadata には保存されない）。不一致なら 409' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': { description: 'Updated target' }, '404': { description: 'Not found' }, '409': { description: '所有アカウントが変わっている（reload が必要）' } },
       },
     },
     '/api/targets/{targetType}/{targetId}/messages': {
@@ -231,13 +244,14 @@ const spec = {
                   senderMode: { type: 'string', enum: ['official', 'self'] },
                   senderStaffId: { type: 'string' },
                   trackLinks: { type: 'boolean', default: true, description: 'URL をアカウント別の計測リンクに自動変換（サーバー側で実施）' },
+                  lineAccountId: { type: 'string', nullable: true, description: 'アカウント所有権の表明。現在の所有者と不一致なら 409（別アカウントのトークンでの誤送信を防ぐ）' },
                 },
                 required: ['content'],
               },
             },
           },
         },
-        responses: { '200': { description: 'Sent' }, '400': { description: 'Invalid body' }, '404': { description: 'Not found' }, '409': { description: 'Target inactive (bot left)' } },
+        responses: { '200': { description: 'Sent' }, '400': { description: 'Invalid body' }, '404': { description: 'Not found' }, '409': { description: 'Target inactive (bot left)、または所有アカウント不一致' } },
       },
     },
     '/api/conversations/{targetType}/{targetId}': {
@@ -250,8 +264,9 @@ const spec = {
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
           { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' } },
           { name: 'beforeId', in: 'query', schema: { type: 'string' }, description: '前ページ最古メッセージの id（before と併用する複合カーソル）' },
+          { name: 'lineAccountId', in: 'query', schema: { type: 'string' }, description: 'アカウント所有権の表明。現在の所有者と不一致なら 409。履歴・参加者は常に現所有者で絞り込まれる' },
         ],
-        responses: { '200': { description: 'Target + messages (ASC)' }, '404': { description: 'Not found' } },
+        responses: { '200': { description: 'Target + messages (ASC)' }, '404': { description: 'Not found' }, '409': { description: '所有アカウントが変わっている（reload が必要）' } },
       },
     },
     // ── Friends ─────────────────────────────────────────────────────────────

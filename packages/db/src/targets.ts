@@ -26,6 +26,12 @@ export interface LineTarget {
    * join must not reactivate a target the bot has since left.
    */
   membership_updated_at: number | null;
+  /**
+   * LINE event.timestamp (ms epoch) of the last successful group-summary name
+   * fetch. Lets a stale name (group renamed after we first saw it) be refreshed
+   * on a later message without re-fetching on every message.
+   */
+  name_refreshed_at: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -69,7 +75,12 @@ export async function getLineTargetByLineTargetId(
 
 export interface ListLineTargetsOptions {
   targetType?: 'group' | 'room';
-  lineAccountId?: string;
+  /**
+   * Tenant scope: `undefined` = all accounts, a string = that account, `null` =
+   * unbound (line_account_id IS NULL) — the legacy env-token scope, which must
+   * exclude targets still bound to a (possibly since-deleted) account.
+   */
+  lineAccountId?: string | null;
   includeInactive?: boolean;
   /**
    * Exact-match filters on JSON metadata keys, e.g.
@@ -90,13 +101,22 @@ export async function listLineTargets(
 
   const conditions: string[] = [];
   const binds: unknown[] = [];
+  // Orphaned targets (owning account row deleted) are invisible in every scope
+  // per the isolation contract: a dangling line_account_id must never surface,
+  // whether the list is unscoped or still filtered by the deleted id. Keep
+  // legacy unbound (NULL) and live-owner rows only. Applies to item + count.
+  conditions.push('(line_account_id IS NULL OR line_account_id IN (SELECT id FROM line_accounts))');
   if (targetType) {
     conditions.push('target_type = ?');
     binds.push(targetType);
   }
-  if (lineAccountId) {
-    conditions.push('line_account_id = ?');
-    binds.push(lineAccountId);
+  if (lineAccountId !== undefined) {
+    if (lineAccountId === null) {
+      conditions.push('line_account_id IS NULL');
+    } else {
+      conditions.push('line_account_id = ?');
+      binds.push(lineAccountId);
+    }
   }
   if (!includeInactive) {
     conditions.push('is_active = 1');
@@ -110,7 +130,7 @@ export async function listLineTargets(
   const result = await db
     .prepare(
       `SELECT * FROM line_targets ${where}
-       ORDER BY COALESCE(last_message_at, updated_at) DESC
+       ORDER BY COALESCE(last_message_at, updated_at) DESC, id DESC
        LIMIT ? OFFSET ?`,
     )
     .bind(...binds, limit, offset)
@@ -130,6 +150,12 @@ export interface UpsertLineTargetInput {
   displayName?: string | null;
   pictureUrl?: string | null;
   lineAccountId?: string | null;
+  /**
+   * LINE event.timestamp (ms) of the group-summary fetch that produced
+   * displayName. Pass it only when displayName was actually (re)fetched so the
+   * caller can throttle future refreshes; omitted keeps the stored value.
+   */
+  nameRefreshedAt?: number | null;
 }
 
 /**
@@ -152,12 +178,18 @@ export async function upsertLineTarget(
   const now = jstNow();
   await db
     .prepare(
-      `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, name_refreshed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
        ON CONFLICT(line_target_id) DO UPDATE SET
          display_name = COALESCE(excluded.display_name, line_targets.display_name),
          picture_url = COALESCE(excluded.picture_url, line_targets.picture_url),
-         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         -- Ownership is monotonic: a message/join only *first-binds* an unbound
+         -- target (NULL → account). It never reassigns a bound owner, so a
+         -- stale redelivered event from a previous account cannot flip the
+         -- tenant scope back. Genuine hand-offs go through setLineTargetActive
+         -- (timestamp-guarded membership transitions).
+         line_account_id = COALESCE(line_targets.line_account_id, excluded.line_account_id),
+         name_refreshed_at = COALESCE(excluded.name_refreshed_at, line_targets.name_refreshed_at),
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -167,6 +199,7 @@ export async function upsertLineTarget(
       input.displayName ?? null,
       input.pictureUrl ?? null,
       input.lineAccountId ?? null,
+      input.nameRefreshedAt ?? null,
       now,
       now,
     )
@@ -206,13 +239,57 @@ export async function setLineTargetActive(
       `INSERT INTO line_targets (id, target_type, line_target_id, is_active, line_account_id, membership_updated_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(line_target_id) DO UPDATE SET
+         -- is_active advances only on a not-older membership event. A JOIN
+         -- (excluded.is_active = 1) may always (re)activate; a LEAVE
+         -- (excluded.is_active = 0) may only deactivate a target the LEAVING
+         -- account actually owns — or a legacy/unbound (NULL owner) one. This
+         -- stops account A's leave from deactivating a group still owned (and
+         -- occupied) by account B when both bots share the group.
          is_active = CASE
-           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND (excluded.is_active = 1
+                     OR line_targets.line_account_id IS excluded.line_account_id
+                     OR line_targets.line_account_id IS NULL)
            THEN excluded.is_active ELSE line_targets.is_active END,
          membership_updated_at = CASE
-           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND (excluded.is_active = 1
+                     OR line_targets.line_account_id IS excluded.line_account_id
+                     OR line_targets.line_account_id IS NULL)
            THEN excluded.membership_updated_at ELSE line_targets.membership_updated_at END,
-         line_account_id = COALESCE(excluded.line_account_id, line_targets.line_account_id),
+         -- Ownership is (re)assigned only by a JOIN with a not-older timestamp
+         -- (first-bind or a genuine handoff). A LEAVE never claims ownership —
+         -- otherwise A leaving a B-owned group would transfer the tenant scope
+         -- (and its CRM metadata) to A. Stale redelivered joins are guarded by
+         -- the timestamp.
+         line_account_id = CASE
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+           THEN COALESCE(excluded.line_account_id, line_targets.line_account_id)
+           ELSE line_targets.line_account_id END,
+         -- On a genuine JOIN handoff (a newer join moving the target from one
+         -- non-null account to a different one), reset metadata:
+         -- salesCustomerPageId/salesDealPageId etc. belong to the previous owner
+         -- and must not leak into the new account's CRM associations. First-bind
+         -- (previous owner NULL), same-owner refreshes, and leaves keep metadata.
+         metadata = CASE
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND line_targets.line_account_id IS NOT NULL
+                AND excluded.line_account_id IS NOT NULL
+                AND excluded.line_account_id <> line_targets.line_account_id
+           THEN '{}' ELSE line_targets.metadata END,
+         -- Same JOIN-handoff condition: the previous owner's last_message_at is
+         -- not the new owner's activity (whose scoped thread is empty until it
+         -- receives a message), so reset it or the list would sort/label the
+         -- target by an unrelated timestamp.
+         last_message_at = CASE
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND line_targets.line_account_id IS NOT NULL
+                AND excluded.line_account_id IS NOT NULL
+                AND excluded.line_account_id <> line_targets.line_account_id
+           THEN NULL ELSE line_targets.last_message_at END,
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -232,11 +309,28 @@ export async function updateLineTargetMetadata(
   db: D1Database,
   id: string,
   metadataJson: string,
-): Promise<void> {
-  await db
-    .prepare(`UPDATE line_targets SET metadata = ?, updated_at = ? WHERE id = ?`)
-    .bind(metadataJson, jstNow(), id)
-    .run();
+  // Optional ownership assertion, applied in the same statement so the check is
+  // atomic w.r.t. concurrent ownership changes: `undefined` = no assertion,
+  // `null` = must be unbound, a string = must be that account. Returns whether a
+  // row was updated (false ⇒ the owner changed under us ⇒ caller returns 409).
+  opts?: { expectedAccountId?: string | null },
+): Promise<LineTarget | null> {
+  let sql = `UPDATE line_targets SET metadata = ?, updated_at = ? WHERE id = ?`;
+  const binds: unknown[] = [metadataJson, jstNow(), id];
+  if (opts && 'expectedAccountId' in opts) {
+    if (opts.expectedAccountId === null) {
+      sql += ` AND line_account_id IS NULL`;
+    } else {
+      sql += ` AND line_account_id = ?`;
+      binds.push(opts.expectedAccountId);
+    }
+  }
+  // RETURNING makes the guard + read atomic: the returned row is the state the
+  // guarded write produced, so a concurrent ownership transfer can't make us
+  // echo another account's row. Null ⇒ no row matched ⇒ caller returns 409.
+  sql += ` RETURNING *`;
+  const row = await db.prepare(sql).bind(...binds).first<LineTarget>();
+  return row ?? null;
 }
 
 export interface LogTargetMessageInput {
@@ -310,18 +404,22 @@ export async function logTargetMessage(
     if (existing) return existing.id;
   }
 
-  // last_message_at is monotonic: a delayed/redelivered old message must not
-  // surface the target as having new activity (timestamps share the same JST
-  // ISO format, so string MAX is chronological).
+  // last_message_at is monotonic (a delayed/redelivered old message must not
+  // surface new activity — timestamps share the JST ISO format so string
+  // compare is chronological) AND owner-scoped: a message whose account is not
+  // the target's current owner (e.g. a stale event from a previous owner after
+  // a hand-off) must not advance the aggregate the new owner sorts/labels by.
+  // `IS` is null-safe, so a legacy (NULL-owner) target matches a NULL account.
   await db
     .prepare(
       `UPDATE line_targets
        SET last_message_at = CASE
-             WHEN last_message_at IS NULL OR last_message_at < ? THEN ? ELSE last_message_at END,
+             WHEN line_account_id IS ? AND (last_message_at IS NULL OR last_message_at < ?)
+             THEN ? ELSE last_message_at END,
            updated_at = ?
        WHERE id = ?`,
     )
-    .bind(createdAt, createdAt, now, input.targetId)
+    .bind(input.lineAccountId ?? null, createdAt, createdAt, now, input.targetId)
     .run();
   return id;
 }
@@ -337,6 +435,15 @@ export interface GetTargetMessagesOptions {
    * boundary. Without it, ties at `before` are excluded (legacy behavior).
    */
   beforeId?: string | null;
+  /**
+   * Tenant scope. When provided, only messages logged under this account are
+   * returned; `null` matches unbound (legacy env-token) rows. Omit for no
+   * filter (back-compat). A group can change owning account over time (A leaves,
+   * B joins the same group id) and each era's rows carry their own
+   * line_account_id — scoping by the current owner keeps another account's
+   * history from surfacing after a hand-off.
+   */
+  lineAccountId?: string | null;
 }
 
 export async function getTargetMessages(
@@ -345,6 +452,9 @@ export async function getTargetMessages(
   opts: GetTargetMessagesOptions = {},
 ): Promise<TargetMessage[]> {
   const { limit = 50, before = null, beforeId = null } = opts;
+  // Explicit `undefined` must mean "no filter" (matches the doc contract):
+  // keying on `'lineAccountId' in opts` would bind undefined and D1-error.
+  const scopeAccount = opts.lineAccountId !== undefined;
   // julianday() cursor: preserves sub-second precision and sorts ISO 8601
   // cursors in any timezone form correctly against stored +09:00 timestamps
   // (same rationale as GET /api/conversations/:friendId).
@@ -353,26 +463,27 @@ export async function getTargetMessages(
   // across pagination requests, and the cursor must be composite
   // ((created_at, id) < (before, beforeId)) so ties straddling a page
   // boundary are not skipped.
-  let sql: string;
-  let binds: (string | number)[];
-  if (before && beforeId) {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ?
-         AND (julianday(created_at) < julianday(?)
-              OR (julianday(created_at) = julianday(?) AND id < ?))
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, before, before, beforeId, limit];
-  } else if (before) {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ? AND julianday(created_at) < julianday(?)
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, before, limit];
-  } else {
-    sql = `SELECT * FROM target_messages_log
-       WHERE target_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT ?`;
-    binds = [targetId, limit];
+  const where: string[] = ['target_id = ?'];
+  const binds: (string | number)[] = [targetId];
+  if (scopeAccount) {
+    if (opts.lineAccountId === null) {
+      where.push('line_account_id IS NULL');
+    } else {
+      where.push('line_account_id = ?');
+      binds.push(opts.lineAccountId as string);
+    }
   }
+  if (before && beforeId) {
+    where.push('(julianday(created_at) < julianday(?) OR (julianday(created_at) = julianday(?) AND id < ?))');
+    binds.push(before, before, beforeId);
+  } else if (before) {
+    where.push('julianday(created_at) < julianday(?)');
+    binds.push(before);
+  }
+  binds.push(limit);
+  const sql = `SELECT * FROM target_messages_log
+     WHERE ${where.join(' AND ')}
+     ORDER BY created_at DESC, id DESC LIMIT ?`;
   const result = await db.prepare(sql).bind(...binds).all<TargetMessage>();
   return result.results;
 }
@@ -391,7 +502,27 @@ export interface TargetParticipant {
 export async function getTargetParticipants(
   db: D1Database,
   targetId: string,
+  // Tenant scope, same contract as getTargetMessages: `undefined` = no filter,
+  // `null` = unbound rows, a string = that account. Prevents speakers from a
+  // previous owning account leaking after a group changes hands.
+  lineAccountId?: string | null,
 ): Promise<TargetParticipant[]> {
+  // Explicit `undefined` means "no filter" (per the doc contract) — keying on
+  // arguments.length would treat an explicit undefined as a scope and bind it.
+  const scoped = lineAccountId !== undefined;
+  const isNull = lineAccountId === null;
+  const subClause = !scoped
+    ? ''
+    : isNull
+      ? ' AND t2.line_account_id IS NULL'
+      : ' AND t2.line_account_id = ?';
+  const outClause = !scoped ? '' : isNull ? ' AND line_account_id IS NULL' : ' AND line_account_id = ?';
+  // Bind order follows `?` appearance in the SQL string: the subquery (in the
+  // SELECT list) comes before the outer WHERE.
+  const binds: string[] = [];
+  if (scoped && !isNull) binds.push(lineAccountId as string);
+  binds.push(targetId);
+  if (scoped && !isNull) binds.push(lineAccountId as string);
   const result = await db
     .prepare(
       `SELECT sender_line_user_id AS lineUserId,
@@ -399,14 +530,14 @@ export async function getTargetParticipants(
               (SELECT t2.sender_display_name FROM target_messages_log t2
                 WHERE t2.target_id = t.target_id
                   AND t2.sender_line_user_id = t.sender_line_user_id
-                  AND t2.sender_display_name IS NOT NULL
+                  AND t2.sender_display_name IS NOT NULL${subClause}
                 ORDER BY t2.created_at DESC LIMIT 1) AS displayName
        FROM target_messages_log t
-       WHERE target_id = ? AND direction = 'incoming' AND sender_line_user_id IS NOT NULL
+       WHERE target_id = ? AND direction = 'incoming' AND sender_line_user_id IS NOT NULL${outClause}
        GROUP BY sender_line_user_id
        ORDER BY lastSpokeAt DESC`,
     )
-    .bind(targetId)
+    .bind(...binds)
     .all<TargetParticipant>();
   return result.results;
 }

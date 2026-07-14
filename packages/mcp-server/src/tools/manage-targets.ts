@@ -28,7 +28,7 @@ export function registerManageTargets(server: McpServer): void {
         .describe(
           "Exact-match metadata filters (for 'list'). E.g. { salesCustomerPageId: '...' } to find every target linked to a customer.",
         ),
-      lineAccountId: z.string().optional().describe("Filter by LINE account (for 'list')"),
+      lineAccountId: z.string().optional().describe("LINE account scope. For 'list' it filters; for 'get'/'set_metadata' it asserts the owning account (409 if the target moved accounts). Defaults to LINE_HARNESS_ACCOUNT_ID."),
       includeInactive: z
         .boolean()
         .default(false)
@@ -67,7 +67,7 @@ export function registerManageTargets(server: McpServer): void {
         }
 
         if (action === "get") {
-          const result = await client.targets.get(targetType, targetId);
+          const result = await client.targets.get(targetType, targetId, { lineAccountId });
           return {
             content: [
               { type: "text" as const, text: JSON.stringify({ success: true, target: result }, null, 2) },
@@ -87,7 +87,7 @@ export function registerManageTargets(server: McpServer): void {
         const PROTECTED_LINK_KEYS = ["salesCustomerPageId", "salesDealPageId"] as const;
         const touchedLinkKeys = PROTECTED_LINK_KEYS.filter((k) => k in metadata);
         if (touchedLinkKeys.length > 0 && !force) {
-          const current = await client.targets.get(targetType, targetId);
+          const current = await client.targets.get(targetType, targetId, { lineAccountId });
           const conflicts = touchedLinkKeys.filter((k) => {
             const existing = current.metadata?.[k];
             return existing != null && existing !== "" && existing !== metadata[k];
@@ -103,7 +103,7 @@ export function registerManageTargets(server: McpServer): void {
           }
         }
 
-        const updated = await client.targets.setMetadata(targetType, targetId, metadata);
+        const updated = await client.targets.setMetadata(targetType, targetId, metadata, { lineAccountId });
         return {
           content: [
             { type: "text" as const, text: JSON.stringify({ success: true, target: updated }, null, 2) },
