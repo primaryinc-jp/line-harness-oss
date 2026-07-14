@@ -286,11 +286,24 @@ export async function updateLineTargetMetadata(
   db: D1Database,
   id: string,
   metadataJson: string,
-): Promise<void> {
-  await db
-    .prepare(`UPDATE line_targets SET metadata = ?, updated_at = ? WHERE id = ?`)
-    .bind(metadataJson, jstNow(), id)
-    .run();
+  // Optional ownership assertion, applied in the same statement so the check is
+  // atomic w.r.t. concurrent ownership changes: `undefined` = no assertion,
+  // `null` = must be unbound, a string = must be that account. Returns whether a
+  // row was updated (false ⇒ the owner changed under us ⇒ caller returns 409).
+  opts?: { expectedAccountId?: string | null },
+): Promise<boolean> {
+  let sql = `UPDATE line_targets SET metadata = ?, updated_at = ? WHERE id = ?`;
+  const binds: unknown[] = [metadataJson, jstNow(), id];
+  if (opts && 'expectedAccountId' in opts) {
+    if (opts.expectedAccountId === null) {
+      sql += ` AND line_account_id IS NULL`;
+    } else {
+      sql += ` AND line_account_id = ?`;
+      binds.push(opts.expectedAccountId);
+    }
+  }
+  const res = await db.prepare(sql).bind(...binds).run();
+  return (res.meta?.changes ?? 0) > 0;
 }
 
 export interface LogTargetMessageInput {

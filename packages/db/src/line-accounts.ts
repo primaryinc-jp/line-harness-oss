@@ -197,6 +197,14 @@ export async function deleteLineAccount(
   db: D1Database,
   id: string,
 ): Promise<void> {
+  // Unbind group/room targets and their history from the deleted account. The
+  // bot never leaves the group when an account row is deleted, so no LINE event
+  // will re-scope these; leaving them pinned to a dangling id would hide the
+  // target from a recreated same-channel account and log new history elsewhere.
+  // Nulling them lets the next message re-adopt the target (NULL → new account)
+  // via upsertLineTarget's first-bind + NULL-history adoption.
+  await db.prepare(`UPDATE line_targets SET line_account_id = NULL WHERE line_account_id = ?`).bind(id).run();
+  await db.prepare(`UPDATE target_messages_log SET line_account_id = NULL WHERE line_account_id = ?`).bind(id).run();
   await db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id).run();
 }
 

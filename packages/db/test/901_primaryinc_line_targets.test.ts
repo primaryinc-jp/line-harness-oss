@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets, getLineTargetByLineTargetId } from '../src/targets.js';
+import { deleteLineAccount } from '../src/line-accounts.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -442,6 +443,36 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(aMsgs.map((m) => m.content)).toEqual(['退出前の履歴']);
     const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
     expect(aParts.map((p) => p.displayName)).toEqual(['発言者']);
+  });
+
+  it('delete/recreate account: target and history re-adopt the new account', async () => {
+    // schema.sql (test harness) omits traffic_pools, whose FK cascade fires on
+    // line_accounts delete; disable FK enforcement here — production has the
+    // full schema. This test exercises the target/history unbinding only.
+    db.exec('PRAGMA foreign_keys = OFF');
+    const d1 = asD1(db);
+    // Bound to the original account with history.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-old' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: '旧アカウント時代', lineMessageId: 'o1', lineAccountId: 'acc-old', senderLineUserId: 'U1',
+    });
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-old' })).length).toBe(1);
+
+    // The account row is deleted (bot never leaves the group, so no LINE event).
+    await deleteLineAccount(d1, 'acc-old');
+    const afterDelete = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(afterDelete.line_account_id).toBeNull();
+    // History was unbound too.
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).length).toBe(1);
+
+    // The same channel is recreated (new internal id) — the next message binds
+    // the target to the new account and adopts the now-unbound history.
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-new' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-new');
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-new' })).map((m) => m.content)).toEqual([
+      '旧アカウント時代',
+    ]);
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {

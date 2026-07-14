@@ -101,6 +101,18 @@ function assertTargetAccount(requested: string | undefined, owner: string | null
   return null;
 }
 
+/**
+ * Parse a body-level `lineAccountId` account-binding assertion. `undefined`
+ * (key absent) = no assertion; `''` or `null` = the unbound (legacy) scope;
+ * any other value = that account. Normalizing `''` to null matches the query
+ * contract in GROUP_TARGETS.md so direct-API callers behave like the SDK.
+ */
+function bodyAccountAssertion(raw: unknown): { asserted: boolean; expected: string | null } {
+  if (raw === undefined) return { asserted: false, expected: null };
+  if (raw === '' || raw === null) return { asserted: true, expected: null };
+  return { asserted: true, expected: String(raw) };
+}
+
 /** Resolve :targetType/:targetId (harness uuid or LINE group/room id). */
 async function resolveTarget(
   db: D1Database,
@@ -215,19 +227,25 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
 
     const body = await c.req.json<Record<string, unknown>>();
     // `lineAccountId` is a reserved account-binding assertion, not a metadata
-    // field — pull it out so it is never merged into stored metadata. When
-    // present it must match the current owner (same guard as reads/sends), so a
-    // stale target id can't rewrite another account's metadata.
-    const { lineAccountId: assertedAccount, ...fields } = body;
-    if (assertedAccount !== undefined && (target.line_account_id ?? null) !== assertedAccount) {
+    // field — pull it out so it is never merged into stored metadata.
+    const { lineAccountId: rawAssertion, ...fields } = body;
+    const { asserted, expected } = bodyAccountAssertion(rawAssertion);
+    const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
+    const merged = { ...existing, ...fields };
+    // Apply the ownership assertion in the same UPDATE statement so it holds even
+    // if a webhook transfers the target between the read above and this write.
+    const didUpdate = await updateLineTargetMetadata(
+      db,
+      target.id,
+      JSON.stringify(merged),
+      asserted ? { expectedAccountId: expected } : undefined,
+    );
+    if (!didUpdate) {
       return c.json(
         { success: false, error: 'Target ownership changed for this account; reload before writing' },
         409,
       );
     }
-    const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
-    const merged = { ...existing, ...fields };
-    await updateLineTargetMetadata(db, target.id, JSON.stringify(merged));
 
     const updated = await getLineTargetById(db, target.id);
     return c.json({ success: true, data: serializeTarget(updated!) });
@@ -316,9 +334,10 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     // Account-binding guard: if the caller states which account it expects to
     // own this target, reject when ownership has since changed (e.g. account A
     // left the group and account B joined the same group id) so the send can't
-    // silently go out under a different account's token. `undefined` means the
-    // caller made no assertion (back-compat); `null` asserts an unbound target.
-    if (body.lineAccountId !== undefined && (target.line_account_id ?? null) !== body.lineAccountId) {
+    // silently go out under a different account's token. Absent = no assertion
+    // (back-compat); '' or null asserts an unbound (legacy) target.
+    const sendAssertion = bodyAccountAssertion(body.lineAccountId);
+    if (sendAssertion.asserted && (target.line_account_id ?? null) !== sendAssertion.expected) {
       return c.json(
         { success: false, error: 'Target ownership changed for this account; reload before sending' },
         409,

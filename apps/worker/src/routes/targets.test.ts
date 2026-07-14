@@ -82,6 +82,9 @@ beforeEach(() => {
   dbMocks.jstNow.mockReturnValue('2026-07-06T12:00:00.000');
   // Staff resolution used by resolveMessageSender (default: send as self)
   dbMocks.getStaffById.mockResolvedValue({ id: 'test-staff', name: 'テスト', is_active: 1, icon_url: null });
+  // Default: metadata update succeeds (a row was changed). Tests that exercise
+  // the ownership-mismatch path override this with mockResolvedValue(false).
+  dbMocks.updateLineTargetMetadata.mockResolvedValue(true);
 });
 
 describe('GET /api/targets', () => {
@@ -261,8 +264,10 @@ describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
     expect(res.status).toBe(404);
   });
 
-  test('409 when the lineAccountId assertion does not match the current owner', async () => {
+  test('409 when the conditional update matches no row (ownership changed under us)', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    // Atomic guard: the conditional UPDATE reports 0 rows changed.
+    dbMocks.updateLineTargetMetadata.mockResolvedValue(false);
     const app = setupApp();
     const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
       method: 'PUT',
@@ -270,7 +275,32 @@ describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
       body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: 'acc-2' }),
     });
     expect(res.status).toBe(409);
-    expect(dbMocks.updateLineTargetMetadata).not.toHaveBeenCalled();
+    // The assertion is applied in the same statement, not a stale pre-check.
+    expect(dbMocks.updateLineTargetMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.any(String),
+      { expectedAccountId: 'acc-2' },
+    );
+  });
+
+  test('empty-string body assertion matches an unbound (legacy) target', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.getLineTargetById.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: '' }),
+    });
+    expect(res.status).toBe(200);
+    // '' normalizes to the unbound (null) assertion, matching a NULL owner.
+    expect(dbMocks.updateLineTargetMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      'tgt-1',
+      expect.any(String),
+      { expectedAccountId: null },
+    );
   });
 
   test('lineAccountId assertion is not merged into stored metadata', async () => {
@@ -504,6 +534,19 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     });
     expect(res.status).toBe(200);
     // Unbound target falls back to the environment token.
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('account-binding: empty-string body assertion matches an unbound target (no 409)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', lineAccountId: '' }),
+    });
+    expect(res.status).toBe(200);
     expect(pushMessage).toHaveBeenCalled();
   });
 
