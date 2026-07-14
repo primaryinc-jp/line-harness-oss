@@ -550,6 +550,20 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     expect(pushMessage).toHaveBeenCalled();
   });
 
+  test('orphaned target (owner account deleted) is rejected, not sent via env token', async () => {
+    // Target still points at a now-deleted account id.
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: 'acc-deleted' });
+    dbMocks.getLineAccountById.mockResolvedValue(null); // account no longer exists
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi' }),
+    });
+    expect(res.status).toBe(409);
+    expect(pushMessage).not.toHaveBeenCalled(); // never falls back to env token
+  });
+
   test('account-binding: omitting the assertion preserves back-compat (no guard)', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
     dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });

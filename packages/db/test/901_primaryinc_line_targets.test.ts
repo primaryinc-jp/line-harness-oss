@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets, getLineTargetByLineTargetId } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets, getLineTargetByLineTargetId, updateLineTargetMetadata } from '../src/targets.js';
 import { deleteLineAccount } from '../src/line-accounts.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -419,6 +419,34 @@ describe('901_primaryinc_line_targets.sql', () => {
     // The A-era message must NOT be adopted into B's scope.
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).map((m) => m.content)).toEqual(['B時代']);
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
+  });
+
+  it('clears metadata when a membership event transfers ownership to a different account', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-A', salesDealPageId: 'deal-A' }));
+    // B takes over via a newer membership event.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(row.line_account_id).toBe('acc-B');
+    // A's CRM associations must not carry into B's scope.
+    expect(JSON.parse(row.metadata || '{}')).toEqual({});
+  });
+
+  it('keeps metadata on a same-owner membership refresh (no spurious clear)', async () => {
+    const d1 = asD1(db);
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-A' }));
+    // Same account, newer membership event (e.g. a re-join).
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(JSON.parse(row.metadata || '{}')).toEqual({ salesCustomerPageId: 'cust-A' });
   });
 
   it('ownership is monotonic: a stale prior-account event cannot flip the owner back', async () => {

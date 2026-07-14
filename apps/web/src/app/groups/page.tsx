@@ -120,6 +120,10 @@ export default function GroupsPage() {
   const detailReqRef = useRef(0)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const openedTargetRef = useRef<Target | null>(null)
+  // Send outcomes that completed after the operator navigated away, keyed by
+  // target id, so reopening that target still surfaces the result (and avoids a
+  // blind duplicate resend of a group-wide message).
+  const pendingSendNoticeRef = useRef<Map<string, { error?: string; notice?: string }>>(new Map())
 
   const loadTargets = useCallback(async () => {
     const reqId = ++listReqRef.current
@@ -294,6 +298,13 @@ export default function GroupsPage() {
         } else {
           setDetail(d)
           setMessages(msgs)
+          // Surface a send outcome that completed while this target was closed.
+          const pending = pendingSendNoticeRef.current.get(target.id)
+          if (pending) {
+            pendingSendNoticeRef.current.delete(target.id)
+            if (pending.error) setSendError(pending.error)
+            if (pending.notice) setRefreshNotice(pending.notice)
+          }
         }
       } catch (err) {
         if (reqId === detailReqRef.current) {
@@ -367,22 +378,33 @@ export default function GroupsPage() {
       setSending(false)
     }
 
-    // Only touch conversation-specific UI if this conversation is still open.
+    // The push may have succeeded even though logging it failed, in which case
+    // the message was delivered to the whole group but will NOT appear in this
+    // view (no log row). Do not tell the operator to judge by the in-app
+    // refresh — direct them to verify in the actual LINE group.
+    const uncertainNotice =
+      '送信結果を確認できませんでした。すでに配信されている可能性があります（この管理画面には反映されない場合があります）。実際のLINEグループで着信を確認し、届いていない場合のみ再送してください。'
+
+    // Only touch conversation-specific UI if this conversation is still open;
+    // otherwise stash the outcome so reopening the target still surfaces it (and
+    // the operator doesn't blind-resend a group-wide message).
     const scopeCurrent = detailReqRef.current === scopeToken
     if (scopeCurrent) {
       if (outcome === 'failed') {
         setSendError(failMessage)
       } else if (outcome === 'unknown') {
-        // The push may have succeeded even though logging it failed, in which
-        // case the message was delivered to the whole group but will NOT appear
-        // in this view (no log row). Do not tell the operator to judge by the
-        // in-app refresh — direct them to verify in the actual LINE group.
-        setRefreshNotice(
-          '送信結果を確認できませんでした。すでに配信されている可能性があります（この管理画面には反映されない場合があります）。実際のLINEグループで着信を確認し、届いていない場合のみ再送してください。',
-        )
+        setRefreshNotice(uncertainNotice)
       } else if (outcome === 'sent') {
         // Only clear the box if the operator hasn't started a new message since.
         setDraft((prev) => (prev === submitted ? '' : prev))
+      }
+    } else {
+      if (outcome === 'failed') {
+        pendingSendNoticeRef.current.set(target.id, { error: failMessage })
+      } else if (outcome === 'unknown') {
+        pendingSendNoticeRef.current.set(target.id, { notice: uncertainNotice })
+      } else if (outcome === 'sent') {
+        pendingSendNoticeRef.current.set(target.id, { notice: '送信は完了しました。' })
       }
     }
 

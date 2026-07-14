@@ -348,12 +348,22 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     }
 
     const { LineClient } = await import('@line-crm/line-sdk');
-    // Resolve access token from the target's account (multi-account support)
+    // Resolve access token from the target's account (multi-account support).
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
     if (target.line_account_id) {
       const { getLineAccountById } = await import('@line-crm/db');
       const account = await getLineAccountById(db, target.line_account_id);
-      if (account) accessToken = account.channel_access_token;
+      if (!account) {
+        // The owning account was deleted — this target is orphaned. Do NOT fall
+        // back to the environment token (that would push from an unrelated
+        // account, breaking the isolation guarantee). Only genuinely unbound
+        // (line_account_id IS NULL) legacy targets use the env token.
+        return c.json(
+          { success: false, error: 'Target owner account no longer exists; cannot send' },
+          409,
+        );
+      }
+      accessToken = account.channel_access_token;
     }
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';

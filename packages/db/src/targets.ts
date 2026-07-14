@@ -234,6 +234,17 @@ export async function setLineTargetActive(
            WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
            THEN COALESCE(excluded.line_account_id, line_targets.line_account_id)
            ELSE line_targets.line_account_id END,
+         -- On a genuine ownership transfer (a newer membership event moving the
+         -- target from one non-null account to a different one), reset metadata:
+         -- salesCustomerPageId/salesDealPageId etc. belong to the previous owner
+         -- and must not leak into the new account's CRM associations. First-bind
+         -- (previous owner NULL) and same-owner refreshes keep metadata.
+         metadata = CASE
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND line_targets.line_account_id IS NOT NULL
+                AND excluded.line_account_id IS NOT NULL
+                AND excluded.line_account_id <> line_targets.line_account_id
+           THEN '{}' ELSE line_targets.metadata END,
          updated_at = excluded.updated_at`,
     )
     .bind(
