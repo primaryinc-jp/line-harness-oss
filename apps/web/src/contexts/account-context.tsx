@@ -54,6 +54,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const refreshAccounts = useCallback(async () => {
+    // Enter the loading state before clearing the error: otherwise a retry
+    // leaves accounts empty + loading false + error false, which consumers
+    // read as a legacy (accountless) install and query unscoped.
+    setLoading(true)
     setError(false)
     try {
       const res = await api.lineAccounts.list()

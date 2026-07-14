@@ -276,6 +276,11 @@ export default function GroupsPage() {
         if (!d) {
           setDetailError('会話の取得に失敗しました。')
           setDetail(null)
+        } else if (hasAccounts && (d.lineAccountId ?? null) !== (selectedAccountId ?? null)) {
+          // Ownership changed since the list loaded — the target now belongs to
+          // another account. Do not render its thread under the current scope.
+          setDetail(null)
+          setDetailError('この会話は別のアカウントに移動しました。一覧を再読み込みしてください。')
         } else {
           setDetail(d)
           setMessages(msgs)
@@ -289,7 +294,7 @@ export default function GroupsPage() {
         if (reqId === detailReqRef.current) setDetailLoading(false)
       }
     },
-    [fetchConversation],
+    [fetchConversation, hasAccounts, selectedAccountId],
   )
 
   const send = useCallback(async () => {
@@ -372,6 +377,13 @@ export default function GroupsPage() {
       try {
         const { detail: d, messages: msgs } = await fetchConversation(target)
         if (reqId !== detailReqRef.current) return
+        if (d && hasAccounts && (d.lineAccountId ?? null) !== (selectedAccountId ?? null)) {
+          // Ownership changed under us — drop the conversation rather than
+          // render another account's thread in the current scope.
+          setDetail(null)
+          setDetailError('この会話は別のアカウントに移動しました。一覧を再読み込みしてください。')
+          return
+        }
         setDetail(d)
         setMessages(msgs)
         // Reflect the refreshed target in the list. Only promote it to the top
@@ -407,7 +419,7 @@ export default function GroupsPage() {
         }
       }
     }
-  }, [detail, draft, senderMode, selectedAccountId, fetchConversation])
+  }, [detail, draft, senderMode, selectedAccountId, hasAccounts, fetchConversation])
 
   // The thread renders oldest→newest, so a freshly opened (or just-sent-to)
   // conversation must jump to the bottom to show the latest message. There is
