@@ -88,6 +88,7 @@ export default function GroupsPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [listError, setListError] = useState<string | null>(null)
+  const [moreError, setMoreError] = useState<string | null>(null)
   const [showAllParticipants, setShowAllParticipants] = useState(false)
 
   // Cap the header participant list; LINE groups can have hundreds of speakers
@@ -114,6 +115,7 @@ export default function GroupsPage() {
     const reqId = ++listReqRef.current
     setLoading(true)
     setListError(null)
+    setMoreError(null)
     // No account selected once loading is done means there are no accounts —
     // never issue an unscoped /api/targets request that would leak every
     // account's targets.
@@ -161,6 +163,7 @@ export default function GroupsPage() {
     const reqId = listReqRef.current
     const nextLimit = Math.min(targets.length + PAGE_SIZE, LIST_MAX)
     setLoadingMore(true)
+    setMoreError(null)
     try {
       const params = new URLSearchParams()
       params.set('lineAccountId', selectedAccountId)
@@ -176,6 +179,9 @@ export default function GroupsPage() {
         setTargets(res.data.items)
         setTotal(res.data.total)
       }
+    } catch {
+      // Keep the already-loaded rows; just report that loading more failed.
+      if (reqId === listReqRef.current) setMoreError('追加の読み込みに失敗しました。')
     } finally {
       if (reqId === listReqRef.current) setLoadingMore(false)
     }
@@ -375,7 +381,10 @@ export default function GroupsPage() {
   useEffect(() => {
     const el = messagesScrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [selectedId, messages.length])
+    // Depend on the newest message id, not the count: at the 100-message cap a
+    // send replaces the oldest row so the length is unchanged, yet we still
+    // need to jump to the newly appended message.
+  }, [selectedId, messages.length ? messages[messages.length - 1].id : null])
 
   return (
     <div className="flex flex-col">
@@ -464,6 +473,9 @@ export default function GroupsPage() {
                     {loadingMore ? '読み込み中…' : `さらに読み込む（残り ${total - targets.length} 件）`}
                   </button>
                 )}
+                {moreError && (
+                  <p className="px-4 py-2 text-xs text-red-600">{moreError}</p>
+                )}
                 {targets.length >= LIST_MAX && total > LIST_MAX && (
                   <p className="px-4 py-3 text-xs text-gray-400">
                     上限 {LIST_MAX} 件を表示中。絞り込みには顧客紐付けからの逆引き（API）をご利用ください。
@@ -524,14 +536,23 @@ export default function GroupsPage() {
                   )}
                 </div>
                 {detail.participants.length > 0 && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    発言者:{' '}
-                    {(showAllParticipants
-                      ? detail.participants
-                      : detail.participants.slice(0, PARTICIPANT_PREVIEW)
-                    )
-                      .map((p) => p.displayName ?? p.lineUserId)
-                      .join('、')}
+                  <div className="mt-1 text-xs text-gray-500">
+                    <span>発言者: </span>
+                    {/* Expanded list is bounded + scrollable so a group with
+                        hundreds of speakers can't push the composer out of the
+                        fixed-height, overflow-hidden pane. */}
+                    <div
+                      className={
+                        showAllParticipants ? 'mt-1 max-h-20 overflow-y-auto' : 'inline'
+                      }
+                    >
+                      {(showAllParticipants
+                        ? detail.participants
+                        : detail.participants.slice(0, PARTICIPANT_PREVIEW)
+                      )
+                        .map((p) => p.displayName ?? p.lineUserId)
+                        .join('、')}
+                    </div>
                     {detail.participants.length > PARTICIPANT_PREVIEW && (
                       <button
                         onClick={() => setShowAllParticipants((v) => !v)}
@@ -542,7 +563,7 @@ export default function GroupsPage() {
                           : `他 ${detail.participants.length - PARTICIPANT_PREVIEW} 名`}
                       </button>
                     )}
-                  </p>
+                  </div>
                 )}
               </div>
 
