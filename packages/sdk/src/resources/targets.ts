@@ -42,10 +42,24 @@ export class TargetsResource {
     return res.data
   }
 
-  async get(targetType: TargetType, targetId: string): Promise<TargetDetail> {
-    const res = await this.http.get<ApiResponse<TargetDetail>>(
-      `/api/targets/${targetType}/${encodeURIComponent(targetId)}`,
-    )
+  async get(
+    targetType: TargetType,
+    targetId: string,
+    params?: {
+      /**
+       * Assert the owning account. Defaults to LINE_HARNESS_ACCOUNT_ID
+       * (config.lineAccountId); the server rejects (409) if the target has
+       * since moved to another account, so a scoped client can't read another
+       * account's thread via a stale target id.
+       */
+      lineAccountId?: string
+    },
+  ): Promise<TargetDetail> {
+    const accountId = params?.lineAccountId ?? this.defaultAccountId
+    const path = `/api/targets/${targetType}/${encodeURIComponent(targetId)}${
+      accountId ? `?lineAccountId=${encodeURIComponent(accountId)}` : ''
+    }`
+    const res = await this.http.get<ApiResponse<TargetDetail>>(path)
     return res.data
   }
 
@@ -69,12 +83,16 @@ export class TargetsResource {
       before?: string
       /** Id of the message `before` came from — composite cursor so messages sharing a timestamp are not skipped across pages. */
       beforeId?: string
+      /** Assert the owning account (defaults to LINE_HARNESS_ACCOUNT_ID); 409 if the target moved accounts. */
+      lineAccountId?: string
     },
   ): Promise<TargetConversation> {
     const query = new URLSearchParams()
     if (params?.limit !== undefined) query.set('limit', String(params.limit))
     if (params?.before !== undefined) query.set('before', params.before)
     if (params?.beforeId !== undefined) query.set('beforeId', params.beforeId)
+    const accountId = params?.lineAccountId ?? this.defaultAccountId
+    if (accountId) query.set('lineAccountId', accountId)
     const qs = query.toString()
     const base = `/api/conversations/${targetType}/${encodeURIComponent(targetId)}`
     const res = await this.http.get<ApiResponse<TargetConversation>>(qs ? `${base}?${qs}` : base)
@@ -95,8 +113,16 @@ export class TargetsResource {
        * pre-track content themselves.
        */
       trackLinks?: boolean
+      /**
+       * Assert the owning account. Defaults to LINE_HARNESS_ACCOUNT_ID
+       * (config.lineAccountId); the server rejects (409) if the target has
+       * since moved to another account, so a scoped client can't push under
+       * another account's token via a stale target id.
+       */
+      lineAccountId?: string
     },
   ): Promise<{ messageId: string }> {
+    const accountId = options?.lineAccountId ?? this.defaultAccountId
     const res = await this.http.post<ApiResponse<{ messageId: string }>>(
       `/api/targets/${targetType}/${encodeURIComponent(targetId)}/messages`,
       {
@@ -105,6 +131,7 @@ export class TargetsResource {
         ...(altText ? { altText } : {}),
         ...(sender ?? {}),
         ...(options?.trackLinks !== undefined ? { trackLinks: options.trackLinks } : {}),
+        ...(accountId ? { lineAccountId: accountId } : {}),
       },
     )
     return res.data

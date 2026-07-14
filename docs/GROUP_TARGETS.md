@@ -63,10 +63,26 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   LINE アプリ内クリックはそのアカウントの LIFF 経由で解決される
 - bot が退出済み（`isActive=false`）の target への送信は 409
 - `limit` は 1..200 の整数、`offset` は 0 以上の整数。範囲外・非数値は 400
+- **アカウント所有権の表明（`lineAccountId`）**: read（詳細・会話）は query
+  `?lineAccountId=`、送信は body の `lineAccountId` で「この target を所有する
+  はずのアカウント」を表明できる。指定した値が現在の所有者と異なる場合は 409
+  （グループが別アカウントに移った後に古い target ID で読取り・送信するのを防ぐ）。
+  空文字は「未紐付け（`line_account_id IS NULL`＝env トークンのみのレガシー）」の
+  表明。省略した場合は表明なし＝後方互換（SDK/MCP で `LINE_HARNESS_ACCOUNT_ID`
+  未設定のとき）。会話・参加者は常に target の現在の所有者で絞り込まれるため、
+  所有者交代後に前アカウント時代のメッセージ・発言者が混ざることはない
+  （レガシー target を初めてアカウントに紐付けた際は、NULL 期の履歴を現所有者へ
+  移管するので履歴は失われない）
+- `list` の `lineAccountId` は 3 値: 省略＝全アカウント、値＝そのアカウント、
+  空文字＝未紐付け（レガシー）のみ
 
 ## SDK / MCP
 
 - SDK: `client.targets.list / get / setMetadata / getConversation / sendMessage`
+  — `LINE_HARNESS_ACCOUNT_ID`（`config.lineAccountId`）を設定すると list だけで
+  なく get / getConversation / sendMessage も自動でその所有権を表明する
+  （移動後の target への読取り・送信は 409）。呼び出し時に `lineAccountId` を
+  明示すると上書きできる
 - MCP: `manage_targets`（list / get / set_metadata）、
   `get_conversation` と `send_message` は `targetType` + `targetId` 指定で
   グループ/ルームに対応

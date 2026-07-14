@@ -159,8 +159,6 @@ export async function upsertLineTarget(
   input: UpsertLineTargetInput,
 ): Promise<LineTarget> {
   const now = jstNow();
-  // Capture the prior owner so we can detect a first-time NULL→account binding.
-  const prior = await getLineTargetByLineTargetId(db, input.lineTargetId);
   await db
     .prepare(
       `INSERT INTO line_targets (id, target_type, line_target_id, display_name, picture_url, is_active, line_account_id, created_at, updated_at)
@@ -183,25 +181,35 @@ export async function upsertLineTarget(
     )
     .run();
 
-  const row = (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
+  // Adopt any NULL-era history onto the current owner (see helper).
+  if (input.lineAccountId) await adoptUnboundHistoryToOwner(db, input.lineTargetId);
 
-  // First bind of a legacy (unbound) target to an account: adopt its NULL-era
-  // history so the account-scoped reads (which filter by the target's current
-  // owner) don't hide messages logged before the channel became an account.
-  // Only NULL rows are touched, so a genuine A→B hand-off never merges the
-  // previous account's messages into the new owner.
-  if (
-    input.lineAccountId &&
-    (prior == null || prior.line_account_id == null) &&
-    row.line_account_id === input.lineAccountId
-  ) {
-    await db
-      .prepare(`UPDATE target_messages_log SET line_account_id = ? WHERE target_id = ? AND line_account_id IS NULL`)
-      .bind(input.lineAccountId, row.id)
-      .run();
-  }
+  return (await getLineTargetByLineTargetId(db, input.lineTargetId))!;
+}
 
-  return row;
+/**
+ * Bind pre-existing unbound (line_account_id IS NULL) history rows to the
+ * target's *current* owner, in a single conditional statement.
+ *
+ * Account-scoped reads filter by the target's owner, so when a legacy target is
+ * first bound to an account its NULL-era messages would otherwise vanish. This
+ * runs after every owner-setting upsert; it is idempotent (only NULL rows are
+ * touched, and it no-ops once the owner is NULL or all rows are bound), so a
+ * genuine A→B hand-off never merges the previous account's rows into the new
+ * owner. Being one statement that reads the owner and updates in the same
+ * breath, it also avoids the read-then-write race of a pre-SELECT + UPDATE.
+ */
+async function adoptUnboundHistoryToOwner(db: D1Database, lineTargetId: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE target_messages_log
+         SET line_account_id = (SELECT lt.line_account_id FROM line_targets lt WHERE lt.line_target_id = ?)
+       WHERE target_id = (SELECT id FROM line_targets WHERE line_target_id = ?)
+         AND line_account_id IS NULL
+         AND (SELECT lt.line_account_id FROM line_targets lt WHERE lt.line_target_id = ?) IS NOT NULL`,
+    )
+    .bind(lineTargetId, lineTargetId, lineTargetId)
+    .run();
 }
 
 export interface SetLineTargetActiveInput {
@@ -255,6 +263,11 @@ export async function setLineTargetActive(
       now,
     )
     .run();
+
+  // A leave/join can be the first account-aware event for a legacy target
+  // (webhook calls setLineTargetActive, not upsertLineTarget), so adopt its
+  // NULL-era history here too or the admin view would lose it after binding.
+  if (input.lineAccountId) await adoptUnboundHistoryToOwner(db, input.lineTargetId);
 }
 
 export async function updateLineTargetMetadata(

@@ -398,6 +398,26 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).map((m) => m.content)).toEqual(['A時代']);
   });
 
+  it('adopts NULL-era history when the first account-aware event is a leave', async () => {
+    const d1 = asD1(db);
+    // Legacy unbound target + history.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
+    await logTargetMessage(d1, {
+      targetId: target.id, direction: 'incoming', messageType: 'text',
+      content: '退出前の履歴', lineMessageId: 'l1', senderLineUserId: 'U1', senderDisplayName: '発言者',
+    });
+    // First account-aware event is a leave (webhook uses setLineTargetActive).
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
+      eventTimestamp: Date.UTC(2026, 6, 10, 3, 0, 0), lineAccountId: 'acc-A',
+    });
+    // History must still be visible under account A despite never upserting.
+    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
+    expect(aMsgs.map((m) => m.content)).toEqual(['退出前の履歴']);
+    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
+    expect(aParts.map((p) => p.displayName)).toEqual(['発言者']);
+  });
+
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {
     const d1 = asD1(db);
     const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
