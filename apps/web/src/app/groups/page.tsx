@@ -76,7 +76,12 @@ function renderContent(m: Pick<TargetMessage, 'messageType' | 'content'>): strin
 }
 
 export default function GroupsPage() {
-  const { selectedAccountId, loading: accountLoading } = useAccount()
+  const {
+    selectedAccountId,
+    loading: accountLoading,
+    error: accountError,
+    refreshAccounts,
+  } = useAccount()
   const [targets, setTargets] = useState<Target[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -430,6 +435,16 @@ export default function GroupsPage() {
           <div className="flex-1 overflow-y-auto">
             {loading ? (
               <p className="p-4 text-sm text-gray-400">読み込み中…</p>
+            ) : accountError ? (
+              <div className="p-4 text-sm text-red-600">
+                <p>アカウント情報の取得に失敗しました。</p>
+                <button
+                  onClick={() => refreshAccounts()}
+                  className="mt-2 rounded border border-red-300 px-3 py-1 text-xs text-red-600 hover:bg-red-50"
+                >
+                  再試行
+                </button>
+              </div>
             ) : listError ? (
               <div className="p-4 text-sm text-red-600">
                 <p>{listError}</p>
