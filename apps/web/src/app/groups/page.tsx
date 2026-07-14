@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchApi } from '@/lib/api'
 import { useAccount } from '@/contexts/account-context'
 import Header from '@/components/layout/header'
@@ -9,6 +9,8 @@ import Header from '@/components/layout/header'
 // friend-centric /chats page: targets have no friend row, messages carry a
 // speaker, and auto-reply/scenario never apply — mixing them into the 1:1 chat
 // UI would tangle both flows. See docs/GROUP_TARGETS.md.
+
+const PAGE_SIZE = 50
 
 interface Target {
   id: string
@@ -74,9 +76,11 @@ function renderContent(m: Pick<TargetMessage, 'messageType' | 'content'>): strin
 }
 
 export default function GroupsPage() {
-  const { selectedAccountId } = useAccount()
+  const { selectedAccountId, loading: accountLoading } = useAccount()
   const [targets, setTargets] = useState<Target[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [includeInactive, setIncludeInactive] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TargetDetail | null>(null)
@@ -88,36 +92,92 @@ export default function GroupsPage() {
   const [senderMode, setSenderMode] = useState<'staff' | 'official'>('staff')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null)
+
+  // Monotonic request tokens. Every account switch / target switch bumps the
+  // relevant ref; async handlers apply their result only if their token is
+  // still current, so a slow response can never overwrite a newer selection
+  // (which would otherwise let an operator send to the wrong account/group).
+  const listReqRef = useRef(0)
+  const detailReqRef = useRef(0)
 
   const loadTargets = useCallback(async () => {
+    const reqId = ++listReqRef.current
     setLoading(true)
+    // No account selected once loading is done means there are no accounts —
+    // never issue an unscoped /api/targets request that would leak every
+    // account's targets.
+    if (!selectedAccountId) {
+      setTargets([])
+      setTotal(0)
+      setLoading(false)
+      return
+    }
+    try {
+      const params = new URLSearchParams()
+      params.set('lineAccountId', selectedAccountId)
+      if (includeInactive) params.set('includeInactive', 'true')
+      params.set('limit', String(PAGE_SIZE))
+      params.set('offset', '0')
+      const res = await fetchApi<{ success: boolean; data: { items: Target[]; total: number } }>(
+        `/api/targets?${params.toString()}`,
+      )
+      if (reqId !== listReqRef.current) return
+      if (res.success) {
+        setTargets(res.data.items)
+        setTotal(res.data.total)
+      }
+    } catch {
+      if (reqId === listReqRef.current) {
+        setTargets([])
+        setTotal(0)
+      }
+    } finally {
+      if (reqId === listReqRef.current) setLoading(false)
+    }
+  }, [selectedAccountId, includeInactive])
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || targets.length >= total) return
+    const reqId = listReqRef.current
+    setLoadingMore(true)
     try {
       const params = new URLSearchParams()
       if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
       if (includeInactive) params.set('includeInactive', 'true')
-      const qs = params.toString()
-      const res = await fetchApi<{ success: boolean; data: { items: Target[] } }>(
-        `/api/targets${qs ? `?${qs}` : ''}`,
+      params.set('limit', String(PAGE_SIZE))
+      params.set('offset', String(targets.length))
+      const res = await fetchApi<{ success: boolean; data: { items: Target[]; total: number } }>(
+        `/api/targets?${params.toString()}`,
       )
-      if (res.success) setTargets(res.data.items)
-    } catch {
-      setTargets([])
+      // A concurrent account/filter change bumps listReqRef; discard this page.
+      if (reqId !== listReqRef.current) return
+      if (res.success) {
+        setTargets((prev) => [...prev, ...res.data.items])
+        setTotal(res.data.total)
+      }
     } finally {
-      setLoading(false)
+      if (reqId === listReqRef.current) setLoadingMore(false)
     }
-  }, [selectedAccountId, includeInactive])
+  }, [loadingMore, targets.length, total, selectedAccountId, includeInactive])
 
+  // Account or filter change: drop any open conversation and draft (they belong
+  // to the previous scope) before reloading. Wait for the account context to
+  // finish loading so the first request is always account-scoped.
   useEffect(() => {
-    loadTargets()
-  }, [loadTargets])
-
-  const openTarget = useCallback(async (target: Target) => {
-    setSelectedId(target.id)
+    detailReqRef.current++ // invalidate any in-flight detail load
+    setSelectedId(null)
     setDetail(null)
     setMessages([])
+    setDraft('')
     setSendError(null)
-    setDetailLoading(true)
-    try {
+    setRefreshNotice(null)
+    if (accountLoading) return
+    loadTargets()
+  }, [loadTargets, accountLoading])
+
+  const fetchConversation = useCallback(
+    async (target: Target): Promise<{ detail: TargetDetail | null; messages: TargetMessage[] }> => {
       const [detailRes, convoRes] = await Promise.all([
         fetchApi<{ success: boolean; data: TargetDetail }>(
           `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}`,
@@ -126,17 +186,44 @@ export default function GroupsPage() {
           `/api/conversations/${target.targetType}/${encodeURIComponent(target.targetId)}?limit=100`,
         ),
       ])
-      if (detailRes.success) setDetail(detailRes.data)
-      if (convoRes.success) setMessages(convoRes.data.messages)
-    } finally {
-      setDetailLoading(false)
-    }
-  }, [])
+      return {
+        detail: detailRes.success ? detailRes.data : null,
+        messages: convoRes.success ? convoRes.data.messages : [],
+      }
+    },
+    [],
+  )
+
+  const openTarget = useCallback(
+    async (target: Target) => {
+      const reqId = ++detailReqRef.current
+      setSelectedId(target.id)
+      setDetail(null)
+      setMessages([])
+      setDraft('')
+      setSendError(null)
+      setRefreshNotice(null)
+      setDetailLoading(true)
+      try {
+        const { detail: d, messages: msgs } = await fetchConversation(target)
+        if (reqId !== detailReqRef.current) return
+        setDetail(d)
+        setMessages(msgs)
+      } catch {
+        if (reqId === detailReqRef.current) setDetail(null)
+      } finally {
+        if (reqId === detailReqRef.current) setDetailLoading(false)
+      }
+    },
+    [fetchConversation],
+  )
 
   const send = useCallback(async () => {
     if (!detail || !draft.trim()) return
     setSending(true)
     setSendError(null)
+    setRefreshNotice(null)
+    let sent = false
     try {
       const res = await fetchApi<{ success: boolean; error?: string }>(
         `/api/targets/${detail.targetType}/${encodeURIComponent(detail.targetId)}/messages`,
@@ -152,14 +239,30 @@ export default function GroupsPage() {
         setSendError(res.error ?? '送信に失敗しました')
         return
       }
+      sent = true
       setDraft('')
-      await openTarget(detail)
     } catch (err) {
       setSendError(err instanceof Error ? err.message : '送信に失敗しました')
     } finally {
       setSending(false)
     }
-  }, [detail, draft, senderMode, openTarget])
+    // The message is already delivered to the whole group. A refresh failure
+    // must NOT read as a send failure, or the operator may resend and
+    // duplicate the group-wide delivery.
+    if (sent) {
+      const reqId = ++detailReqRef.current
+      try {
+        const { detail: d, messages: msgs } = await fetchConversation(detail)
+        if (reqId !== detailReqRef.current) return
+        setDetail(d)
+        setMessages(msgs)
+      } catch {
+        if (reqId === detailReqRef.current) {
+          setRefreshNotice('送信は完了しましたが、会話の再読み込みに失敗しました。')
+        }
+      }
+    }
+  }, [detail, draft, senderMode, fetchConversation])
 
   return (
     <div className="flex h-screen flex-col">
@@ -169,7 +272,8 @@ export default function GroupsPage() {
         <aside className="flex w-80 flex-col border-r border-gray-200 bg-white">
           <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
             <span className="text-sm font-medium text-gray-700">
-              {targets.length} 件
+              {targets.length}
+              {total > targets.length ? ` / ${total}` : ''} 件
             </span>
             <label className="flex items-center gap-1.5 text-xs text-gray-500">
               <input
@@ -188,39 +292,50 @@ export default function GroupsPage() {
                 グループがありません。公式アカウントをグループに招待するか、グループで発言があると登録されます。
               </p>
             ) : (
-              targets.map((target) => (
-                <button
-                  key={target.id}
-                  onClick={() => openTarget(target)}
-                  className={`flex w-full items-start gap-3 border-b border-gray-50 px-4 py-3 text-left hover:bg-gray-50 ${
-                    selectedId === target.id ? 'bg-emerald-50' : ''
-                  }`}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="truncate text-sm font-medium text-gray-800">
-                        {target.displayName}
-                      </span>
-                      {!target.isActive && (
-                        <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
-                          退出済み
+              <>
+                {targets.map((target) => (
+                  <button
+                    key={target.id}
+                    onClick={() => openTarget(target)}
+                    className={`flex w-full items-start gap-3 border-b border-gray-50 px-4 py-3 text-left hover:bg-gray-50 ${
+                      selectedId === target.id ? 'bg-emerald-50' : ''
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-gray-800">
+                          {target.displayName}
+                        </span>
+                        {!target.isActive && (
+                          <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                            退出済み
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-400">
+                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-600">
+                          {typeLabel[target.targetType]}
+                        </span>
+                        <span>{formatDatetime(target.lastMessageAt)}</span>
+                      </div>
+                      {typeof target.metadata.salesCustomerPageId === 'string' && (
+                        <span className="mt-1 inline-block rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600">
+                          顧客紐付け済み
                         </span>
                       )}
                     </div>
-                    <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-400">
-                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-600">
-                        {typeLabel[target.targetType]}
-                      </span>
-                      <span>{formatDatetime(target.lastMessageAt)}</span>
-                    </div>
-                    {typeof target.metadata.salesCustomerPageId === 'string' && (
-                      <span className="mt-1 inline-block rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600">
-                        顧客紐付け済み
-                      </span>
-                    )}
-                  </div>
-                </button>
-              ))
+                  </button>
+                ))}
+                {targets.length < total && (
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    className="w-full px-4 py-3 text-sm text-emerald-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {loadingMore ? '読み込み中…' : `さらに読み込む（残り ${total - targets.length} 件）`}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </aside>
@@ -294,6 +409,9 @@ export default function GroupsPage() {
                   <>
                     {sendError && (
                       <p className="mb-2 text-xs text-red-600">{sendError}</p>
+                    )}
+                    {refreshNotice && (
+                      <p className="mb-2 text-xs text-amber-600">{refreshNotice}</p>
                     )}
                     <div className="flex items-end gap-2">
                       <textarea
