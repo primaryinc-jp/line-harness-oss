@@ -137,23 +137,30 @@ export default function GroupsPage() {
     }
   }, [selectedAccountId, includeInactive])
 
+  // The list is ordered by last_message_at (mutable), so appending by offset
+  // would skip or duplicate rows when activity reorders the list between
+  // requests. Instead re-fetch the whole prefix (offset 0, larger limit) and
+  // replace, which is always internally consistent. The route caps limit at
+  // 200; beyond that the button hides and we note the ceiling.
+  const LIST_MAX = 200
   const loadMore = useCallback(async () => {
-    if (loadingMore || targets.length >= total) return
+    if (loadingMore || targets.length >= total || !selectedAccountId) return
     const reqId = listReqRef.current
+    const nextLimit = Math.min(targets.length + PAGE_SIZE, LIST_MAX)
     setLoadingMore(true)
     try {
       const params = new URLSearchParams()
-      if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
+      params.set('lineAccountId', selectedAccountId)
       if (includeInactive) params.set('includeInactive', 'true')
-      params.set('limit', String(PAGE_SIZE))
-      params.set('offset', String(targets.length))
+      params.set('limit', String(nextLimit))
+      params.set('offset', '0')
       const res = await fetchApi<{ success: boolean; data: { items: Target[]; total: number } }>(
         `/api/targets?${params.toString()}`,
       )
       // A concurrent account/filter change bumps listReqRef; discard this page.
       if (reqId !== listReqRef.current) return
       if (res.success) {
-        setTargets((prev) => [...prev, ...res.data.items])
+        setTargets(res.data.items)
         setTotal(res.data.total)
       }
     } finally {
@@ -172,6 +179,10 @@ export default function GroupsPage() {
     setDraft('')
     setSendError(null)
     setRefreshNotice(null)
+    // The invalidated in-flight handlers skip their own cleanup on token
+    // mismatch, so clear their loading flags here or the panes stay stuck.
+    setDetailLoading(false)
+    setLoadingMore(false)
     if (accountLoading) return
     loadTargets()
   }, [loadTargets, accountLoading])
@@ -220,13 +231,18 @@ export default function GroupsPage() {
 
   const send = useCallback(async () => {
     if (!detail || !draft.trim()) return
+    const target = detail
+    // Token as of the currently open conversation. If the operator switches
+    // target or account mid-send, openTarget / the scope effect bumps this and
+    // we must not touch the newer scope's state.
+    const scopeToken = detailReqRef.current
     setSending(true)
     setSendError(null)
     setRefreshNotice(null)
-    let sent = false
+    let outcome: 'sent' | 'failed' | 'unknown' = 'failed'
     try {
       const res = await fetchApi<{ success: boolean; error?: string }>(
-        `/api/targets/${detail.targetType}/${encodeURIComponent(detail.targetId)}/messages`,
+        `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}/messages`,
         {
           method: 'POST',
           body: JSON.stringify({
@@ -236,28 +252,37 @@ export default function GroupsPage() {
         },
       )
       if (!res.success) {
+        // Server explicitly rejected — nothing was delivered, safe to retry.
+        outcome = 'failed'
         setSendError(res.error ?? '送信に失敗しました')
-        return
+      } else {
+        outcome = 'sent'
+        setDraft('')
       }
-      sent = true
-      setDraft('')
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : '送信に失敗しました')
+    } catch {
+      // Transport error: the Worker may have already pushed to the whole group
+      // before failing (e.g. logging the message afterwards threw). Presenting
+      // this as a definite failure invites a blind retry that duplicates the
+      // group-wide delivery. Report an unknown result and keep the draft.
+      outcome = 'unknown'
+      setRefreshNotice(
+        '送信結果を確認できませんでした。会話を再読み込みして反映を確認し、届いていない場合のみ再送してください。',
+      )
     } finally {
       setSending(false)
     }
-    // The message is already delivered to the whole group. A refresh failure
-    // must NOT read as a send failure, or the operator may resend and
-    // duplicate the group-wide delivery.
-    if (sent) {
+    // Refresh only if this conversation is still the selected scope. A refresh
+    // failure after a successful send must NOT read as a send failure.
+    if (outcome === 'sent' || outcome === 'unknown') {
+      if (detailReqRef.current !== scopeToken) return
       const reqId = ++detailReqRef.current
       try {
-        const { detail: d, messages: msgs } = await fetchConversation(detail)
+        const { detail: d, messages: msgs } = await fetchConversation(target)
         if (reqId !== detailReqRef.current) return
         setDetail(d)
         setMessages(msgs)
       } catch {
-        if (reqId === detailReqRef.current) {
+        if (reqId === detailReqRef.current && outcome === 'sent') {
           setRefreshNotice('送信は完了しましたが、会話の再読み込みに失敗しました。')
         }
       }
@@ -326,7 +351,7 @@ export default function GroupsPage() {
                     </div>
                   </button>
                 ))}
-                {targets.length < total && (
+                {targets.length < total && targets.length < LIST_MAX && (
                   <button
                     onClick={loadMore}
                     disabled={loadingMore}
@@ -334,6 +359,11 @@ export default function GroupsPage() {
                   >
                     {loadingMore ? '読み込み中…' : `さらに読み込む（残り ${total - targets.length} 件）`}
                   </button>
+                )}
+                {targets.length >= LIST_MAX && total > LIST_MAX && (
+                  <p className="px-4 py-3 text-xs text-gray-400">
+                    上限 {LIST_MAX} 件を表示中。絞り込みには顧客紐付けからの逆引き（API）をご利用ください。
+                  </p>
                 )}
               </>
             )}
