@@ -77,11 +77,16 @@ function renderContent(m: Pick<TargetMessage, 'messageType' | 'content'>): strin
 
 export default function GroupsPage() {
   const {
+    accounts,
     selectedAccountId,
     loading: accountLoading,
     error: accountError,
     refreshAccounts,
   } = useAccount()
+  // Legacy single-tenant installs use only the environment LINE token and have
+  // no account rows; their targets carry line_account_id = NULL. In that case
+  // there is no cross-account leak, so an unscoped list query is correct.
+  const hasAccounts = accounts.length > 0
   const [targets, setTargets] = useState<Target[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -121,10 +126,15 @@ export default function GroupsPage() {
     setLoading(true)
     setListError(null)
     setMoreError(null)
-    // No account selected once loading is done means there are no accounts —
-    // never issue an unscoped /api/targets request that would leak every
-    // account's targets.
-    if (!selectedAccountId) {
+    if (accountError) {
+      // The account-load error branch renders its own retry; don't query.
+      setLoading(false)
+      return
+    }
+    // If accounts exist but none is selected yet (transient), stay empty rather
+    // than issuing an unscoped query that would leak every account's targets.
+    // With zero accounts (legacy env-token install) an unscoped query is safe.
+    if (hasAccounts && !selectedAccountId) {
       setTargets([])
       setTotal(0)
       setLoading(false)
@@ -132,7 +142,7 @@ export default function GroupsPage() {
     }
     try {
       const params = new URLSearchParams()
-      params.set('lineAccountId', selectedAccountId)
+      if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
       if (includeInactive) params.set('includeInactive', 'true')
       params.set('limit', String(PAGE_SIZE))
       params.set('offset', '0')
@@ -155,7 +165,7 @@ export default function GroupsPage() {
     } finally {
       if (reqId === listReqRef.current) setLoading(false)
     }
-  }, [selectedAccountId, includeInactive])
+  }, [selectedAccountId, includeInactive, hasAccounts, accountError])
 
   // The list is ordered by last_message_at (mutable), so appending by offset
   // would skip or duplicate rows when activity reorders the list between
@@ -164,14 +174,15 @@ export default function GroupsPage() {
   // 200; beyond that the button hides and we note the ceiling.
   const LIST_MAX = 200
   const loadMore = useCallback(async () => {
-    if (loadingMore || targets.length >= total || !selectedAccountId) return
+    if (loadingMore || targets.length >= total) return
+    if (hasAccounts && !selectedAccountId) return
     const reqId = listReqRef.current
     const nextLimit = Math.min(targets.length + PAGE_SIZE, LIST_MAX)
     setLoadingMore(true)
     setMoreError(null)
     try {
       const params = new URLSearchParams()
-      params.set('lineAccountId', selectedAccountId)
+      if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
       if (includeInactive) params.set('includeInactive', 'true')
       params.set('limit', String(nextLimit))
       params.set('offset', '0')
@@ -190,7 +201,7 @@ export default function GroupsPage() {
     } finally {
       if (reqId === listReqRef.current) setLoadingMore(false)
     }
-  }, [loadingMore, targets.length, total, selectedAccountId, includeInactive])
+  }, [loadingMore, targets.length, total, selectedAccountId, includeInactive, hasAccounts])
 
   // Account or filter change: drop any open conversation and draft (they belong
   // to the previous scope) before reloading. Wait for the account context to
@@ -301,6 +312,9 @@ export default function GroupsPage() {
           method: 'POST',
           body: JSON.stringify({
             content: draft,
+            // Assert the scope we loaded under so the Worker rejects the send
+            // if this target's ownership changed to another account meanwhile.
+            lineAccountId: selectedAccountId,
             ...(senderMode === 'official' ? { senderMode: 'official' } : {}),
           }),
         },
@@ -393,7 +407,7 @@ export default function GroupsPage() {
         }
       }
     }
-  }, [detail, draft, senderMode, fetchConversation])
+  }, [detail, draft, senderMode, selectedAccountId, fetchConversation])
 
   // The thread renders oldest→newest, so a freshly opened (or just-sent-to)
   // conversation must jump to the bottom to show the latest message. There is

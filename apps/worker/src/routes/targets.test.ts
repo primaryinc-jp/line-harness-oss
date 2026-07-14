@@ -377,4 +377,59 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     });
     expect(res.status).toBe(400);
   });
+
+  test('account-binding: rejects with 409 when the target now belongs to another account', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owned by acc-1
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Caller believed it was scoped to acc-2, but ownership is acc-1 now.
+      body: JSON.stringify({ content: 'hello', lineAccountId: 'acc-2' }),
+    });
+    expect(res.status).toBe(409);
+    expect(pushMessage).not.toHaveBeenCalled();
+  });
+
+  test('account-binding: allows the send when the asserted account matches', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owned by acc-1
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello', lineAccountId: 'acc-1' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('account-binding: a null assertion matches an unbound (legacy) target', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, line_account_id: null });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello', lineAccountId: null }),
+    });
+    expect(res.status).toBe(200);
+    // Unbound target falls back to the environment token.
+    expect(pushMessage).toHaveBeenCalled();
+  });
+
+  test('account-binding: omitting the assertion preserves back-compat (no guard)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
+    dbMocks.logTargetMessage.mockResolvedValue('log-1');
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hello' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pushMessage).toHaveBeenCalled();
+  });
 });

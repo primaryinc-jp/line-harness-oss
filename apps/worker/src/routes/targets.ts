@@ -251,6 +251,10 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
       content: string;
       altText?: string;
       trackLinks?: boolean;
+      // Optional account-binding assertion: the account the caller believes
+      // owns this target. Omitted by SDK/MCP callers (guard skipped); the admin
+      // UI sends its scoped account so a mid-session ownership change is caught.
+      lineAccountId?: string | null;
     } & SenderSelection>();
     if (!body.content) {
       return c.json({ success: false, error: 'content is required' }, 400);
@@ -260,6 +264,17 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     const target = await resolveTarget(db, targetType, c.req.param('targetId'));
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+    // Account-binding guard: if the caller states which account it expects to
+    // own this target, reject when ownership has since changed (e.g. account A
+    // left the group and account B joined the same group id) so the send can't
+    // silently go out under a different account's token. `undefined` means the
+    // caller made no assertion (back-compat); `null` asserts an unbound target.
+    if (body.lineAccountId !== undefined && (target.line_account_id ?? null) !== body.lineAccountId) {
+      return c.json(
+        { success: false, error: 'Target ownership changed for this account; reload before sending' },
+        409,
+      );
     }
     if (!target.is_active) {
       return c.json({ success: false, error: 'Target is inactive (bot has left the group/room)' }, 409);
