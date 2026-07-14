@@ -95,6 +95,19 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   参照可能）。異なるチャネルの account が同一グループに同席するケースでの
   誤移管（漏洩）を防ぐための保守的な仕様
 
+### 残 P2（安全側に倒し済み・磨き込みは backlog）
+
+所有権の分離は担保済み（P1 なし）。以下は所有者交代直後の稀な UX 粗さで、
+安全側（漏洩なし・誤送信なし）に倒したうえで backlog 管理する。
+
+- **stale-owner の updated_at**: 交代後に旧 account の遅延メッセージが届くと
+  `updated_at` が更新され、`COALESCE(last_message_at, updated_at)` 並びで一時的に
+  上位に来ることがある（`last_message_at` 自体は所有者一致時のみ更新済み）
+- **複数同時 in-flight 送信の通知保持**: 管理画面は「離脱後に完了した送信結果」を
+  1 件だけ保持する。別 target へ連続送信して両方離脱すると先の通知が上書きされる
+- **遅延失敗送信の下書き復元**: 送信中に target/account を切り替えると下書きは
+  クリアされる。再オープン時に失敗/不確定通知は出るが本文は復元されない
+
 ## SDK / MCP
 
 - SDK: `client.targets.list / get / setMetadata / getConversation / sendMessage`
