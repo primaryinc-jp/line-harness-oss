@@ -214,8 +214,19 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
     }
 
     const body = await c.req.json<Record<string, unknown>>();
+    // `lineAccountId` is a reserved account-binding assertion, not a metadata
+    // field — pull it out so it is never merged into stored metadata. When
+    // present it must match the current owner (same guard as reads/sends), so a
+    // stale target id can't rewrite another account's metadata.
+    const { lineAccountId: assertedAccount, ...fields } = body;
+    if (assertedAccount !== undefined && (target.line_account_id ?? null) !== assertedAccount) {
+      return c.json(
+        { success: false, error: 'Target ownership changed for this account; reload before writing' },
+        409,
+      );
+    }
     const existing = JSON.parse(target.metadata || '{}') as Record<string, unknown>;
-    const merged = { ...existing, ...body };
+    const merged = { ...existing, ...fields };
     await updateLineTargetMetadata(db, target.id, JSON.stringify(merged));
 
     const updated = await getLineTargetById(db, target.id);

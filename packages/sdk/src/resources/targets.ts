@@ -67,10 +67,20 @@ export class TargetsResource {
     targetType: TargetType,
     targetId: string,
     fields: Record<string, unknown>,
+    params?: {
+      /**
+       * Assert the owning account (defaults to LINE_HARNESS_ACCOUNT_ID); the
+       * server rejects (409) if the target moved accounts, so a scoped client
+       * can't rewrite another account's metadata via a stale target id. Sent as
+       * a reserved key, not stored as metadata.
+       */
+      lineAccountId?: string
+    },
   ): Promise<Target> {
+    const accountId = params?.lineAccountId ?? this.defaultAccountId
     const res = await this.http.put<ApiResponse<Target>>(
       `/api/targets/${targetType}/${encodeURIComponent(targetId)}/metadata`,
-      fields,
+      accountId ? { ...fields, lineAccountId: accountId } : fields,
     )
     return res.data
   }

@@ -110,6 +110,23 @@ describe('TargetsResource', () => {
     })
   })
 
+  it('setMetadata() asserts the default account as a reserved body key', async () => {
+    const http = mockHttp({ put: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    const resource = new TargetsResource(http, 'acc_default')
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'deal-9' })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', {
+      salesDealPageId: 'deal-9',
+      lineAccountId: 'acc_default',
+    })
+  })
+
+  it('setMetadata() omits the assertion when unscoped (back-compat)', async () => {
+    const http = mockHttp({ put: vi.fn().mockResolvedValue({ success: true, data: {} }) })
+    const resource = new TargetsResource(http)
+    await resource.setMetadata('group', 'Cg1', { salesDealPageId: 'deal-9' })
+    expect(http.put).toHaveBeenCalledWith('/api/targets/group/Cg1/metadata', { salesDealPageId: 'deal-9' })
+  })
+
   it('no default account: reads/sends omit the assertion (back-compat)', async () => {
     const http = mockHttp({
       get: vi.fn().mockResolvedValue({ success: true, data: {} }),

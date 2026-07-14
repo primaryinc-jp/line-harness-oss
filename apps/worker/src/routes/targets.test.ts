@@ -260,6 +260,34 @@ describe('PUT /api/targets/:targetType/:targetId/metadata', () => {
     });
     expect(res.status).toBe(404);
   });
+
+  test('409 when the lineAccountId assertion does not match the current owner', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: 'acc-2' }),
+    });
+    expect(res.status).toBe(409);
+    expect(dbMocks.updateLineTargetMetadata).not.toHaveBeenCalled();
+  });
+
+  test('lineAccountId assertion is not merged into stored metadata', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineTargetById.mockResolvedValue(groupTarget);
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789/metadata', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesDealPageId: 'deal-9', lineAccountId: 'acc-1' }),
+    });
+    expect(res.status).toBe(200);
+    const [, , mergedJson] = dbMocks.updateLineTargetMetadata.mock.calls[0];
+    const merged = JSON.parse(mergedJson as string) as Record<string, unknown>;
+    expect(merged.lineAccountId).toBeUndefined(); // reserved key, never stored
+    expect(merged.salesDealPageId).toBe('deal-9');
+  });
 });
 
 describe('GET /api/conversations/:targetType/:targetId', () => {
