@@ -70,11 +70,30 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   空文字は「未紐付け（`line_account_id IS NULL`＝env トークンのみのレガシー）」の
   表明。省略した場合は表明なし＝後方互換（SDK/MCP で `LINE_HARNESS_ACCOUNT_ID`
   未設定のとき）。会話・参加者は常に target の現在の所有者で絞り込まれるため、
-  所有者交代後に前アカウント時代のメッセージ・発言者が混ざることはない
-  （レガシー target を初めてアカウントに紐付けた際は、NULL 期の履歴を現所有者へ
-  移管するので履歴は失われない）
+  所有者交代後に前アカウント時代のメッセージ・発言者が混ざることはない。
+  所有権は単調（monotonic）で、message/join は未紐付け target を初回バインド
+  するのみ、既にバインド済みの所有者を再割り当てしない。真の交代は新しい
+  membership イベント（join/leave の timestamp 比較）でのみ発生する
 - `list` の `lineAccountId` は 3 値: 省略＝全アカウント、値＝そのアカウント、
   空文字＝未紐付け（レガシー）のみ
+
+## Known limitations（backlog: 安定チャネル識別子）
+
+アカウント所有権は line_accounts の内部 ID で表現される。この ID はアカウント
+削除で失われるため、以下は現状「安全側（漏洩なし）に倒す」挙動になっている。
+恒久対応には削除をまたいで安定するチャネル識別子（channel_id ベース）の導入が
+必要で、別タスクとして backlog 管理する。
+
+- **アカウント削除**: 削除された account の target と履歴は dangling ID のまま
+  残り「orphaned」になる（NULL 化しない）。orphaned は全 scope で不可視になり、
+  legacy（NULL）scope にも現れず env トークン送信にもフォールバックしない。
+  代償として、削除後にその target へは UI/API からアクセスできなくなる
+- **同一チャネル再作成**: 同じ LINE チャネルを新 account として作り直しても、
+  orphaned target は新 account へ自動再アタッチされない（安定識別子が必要）
+- **レガシー履歴の非移管**: env トークン（NULL 所有）運用から account 登録へ
+  移行しても、NULL 期の履歴は account scope へ移管されない（NULL scope でのみ
+  参照可能）。異なるチャネルの account が同一グループに同席するケースでの
+  誤移管（漏洩）を防ぐための保守的な仕様
 
 ## SDK / MCP
 

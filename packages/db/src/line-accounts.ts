@@ -197,23 +197,17 @@ export async function deleteLineAccount(
   db: D1Database,
   id: string,
 ): Promise<void> {
-  // Unbind group/room *targets* (not their history) from the deleted account,
-  // atomically with the delete. The bot never leaves the group when an account
-  // row is deleted, so no LINE event re-scopes the target; leaving it pinned to
-  // a dangling id would hide it from a recreated account. Nulling the target
-  // lets the next message first-bind it to the new owner.
-  //
-  // History rows are deliberately NOT nulled: they keep the (now dangling)
-  // account id so they stay orphaned — invisible to every account's scoped
-  // reads — rather than becoming NULL "legacy" rows that a *different* account
-  // joining the same group id could then adopt (cross-account leak).
-  //
-  // db.batch is atomic: if the DELETE fails (e.g. a non-cascading FK still
-  // references the account), the target unbind rolls back too.
-  await db.batch([
-    db.prepare(`UPDATE line_targets SET line_account_id = NULL WHERE line_account_id = ?`).bind(id),
-    db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id),
-  ]);
+  // Deleting the account row leaves its group/room targets and history pointing
+  // at the (now dangling) id. That is deliberate: such rows are ORPHANED, not
+  // legacy — they never match any account-scoped read nor the legacy unbound
+  // (NULL) scope, so they simply become invisible. We intentionally do NOT null
+  // them: turning a deleted account's rows into NULL would (a) make them appear
+  // in the legacy env-token scope and fall back to LINE_CHANNEL_ACCESS_TOKEN,
+  // and (b) let a different account joining the same group id adopt the prior
+  // account's history. Safely re-attaching an orphaned target to a recreated
+  // same-channel account requires a stable channel identity — tracked as a
+  // backlog item (see docs/GROUP_TARGETS.md "Known limitations").
+  await db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id).run();
 }
 
 export interface UpdateLineAccountFieldsInput {

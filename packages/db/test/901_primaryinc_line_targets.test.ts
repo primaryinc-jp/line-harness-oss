@@ -374,7 +374,7 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(bound.items.map((t) => t.line_target_id)).toEqual(['Cbound']);
   });
 
-  it('adopts NULL-era history when a legacy target is first bound to an account', async () => {
+  it('does NOT adopt NULL-era history into an account (isolation over convenience)', async () => {
     const d1 = asD1(db);
     // Legacy: unbound target with unbound (NULL) history.
     const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
@@ -384,14 +384,18 @@ describe('901_primaryinc_line_targets.sql', () => {
       senderLineUserId: 'U-legacy', senderDisplayName: 'レガシー人',
     });
 
-    // The channel is registered as account A — re-upsert binds the target.
+    // The target is bound to account A (first-bind: NULL → A).
     await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-A' });
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-A');
 
-    // The pre-binding history must now be visible under account A's scope.
-    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
-    expect(aMsgs.map((m) => m.content)).toEqual(['レガシー履歴']);
-    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
-    expect(aParts.map((p) => p.displayName)).toEqual(['レガシー人']);
+    // The pre-binding NULL history is NOT re-labelled as A's. Auto-adopting it
+    // would let a different account joining the same group id read history from
+    // before it existed; safely re-attaching it needs a stable channel identity
+    // (backlog). The NULL history stays visible only under the unbound scope.
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' })).length).toBe(0);
+    expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).map((m) => m.content)).toEqual([
+      'レガシー履歴',
+    ]);
   });
 
   it('does not merge a true A→B hand-off into the new owner', async () => {
@@ -439,54 +443,33 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
   });
 
-  it('adopts NULL-era history when the first account-aware event is a leave', async () => {
-    const d1 = asD1(db);
-    // Legacy unbound target + history.
-    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1' });
-    await logTargetMessage(d1, {
-      targetId: target.id, direction: 'incoming', messageType: 'text',
-      content: '退出前の履歴', lineMessageId: 'l1', senderLineUserId: 'U1', senderDisplayName: '発言者',
-    });
-    // First account-aware event is a leave (webhook uses setLineTargetActive).
-    await setLineTargetActive(d1, {
-      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
-      eventTimestamp: Date.UTC(2026, 6, 10, 3, 0, 0), lineAccountId: 'acc-A',
-    });
-    // History must still be visible under account A despite never upserting.
-    const aMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-A' });
-    expect(aMsgs.map((m) => m.content)).toEqual(['退出前の履歴']);
-    const aParts = await getTargetParticipants(d1, target.id, 'acc-A');
-    expect(aParts.map((p) => p.displayName)).toEqual(['発言者']);
-  });
-
-  it('delete/recreate account: target rebinds, but prior history stays orphaned (no leak)', async () => {
+  it('account deletion orphans its targets/history — never legacy scope, never leaked', async () => {
     // schema.sql (test harness) omits traffic_pools, whose FK cascade fires on
     // line_accounts delete; disable FK enforcement here — production has the
     // full schema.
     db.exec('PRAGMA foreign_keys = OFF');
     const d1 = asD1(db);
-    // Bound to the original account with history.
     const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-old' });
     await logTargetMessage(d1, {
       targetId: target.id, direction: 'incoming', messageType: 'text',
       content: '旧アカウント時代', lineMessageId: 'o1', lineAccountId: 'acc-old', senderLineUserId: 'U1',
     });
 
-    // The account row is deleted (bot never leaves the group, so no LINE event).
+    // Deleting the account leaves the target + history pinned to the dangling id.
     await deleteLineAccount(d1, 'acc-old');
-    // The target is unbound so it can rebind, but its history keeps the dead id.
-    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBeNull();
+    const orphan = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(orphan.line_account_id).toBe('acc-old'); // NOT nulled → not legacy scope
+
+    // Orphaned rows are invisible under the legacy (unbound/NULL) scope, so they
+    // never fall into env-token send fallback or a different account's view.
+    expect((await listLineTargets(d1, { lineAccountId: null })).items).toEqual([]);
     expect((await getTargetMessages(d1, target.id, { lineAccountId: null })).length).toBe(0);
 
-    // A different account B joins the same group id and sends — the target
-    // rebinds to B, but B must NOT see account A's prior conversation.
+    // A different account B joining the same group id does not inherit the
+    // target (ownership is monotonic) and cannot see A's history.
     await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
-    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
+    expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-old');
     expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' })).length).toBe(0);
-    // A's history remains orphaned under its original (now dangling) id.
-    expect((await getTargetMessages(d1, target.id, { lineAccountId: 'acc-old' })).map((m) => m.content)).toEqual([
-      '旧アカウント時代',
-    ]);
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {
