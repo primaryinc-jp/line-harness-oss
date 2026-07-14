@@ -197,15 +197,23 @@ export async function deleteLineAccount(
   db: D1Database,
   id: string,
 ): Promise<void> {
-  // Unbind group/room targets and their history from the deleted account. The
-  // bot never leaves the group when an account row is deleted, so no LINE event
-  // will re-scope these; leaving them pinned to a dangling id would hide the
-  // target from a recreated same-channel account and log new history elsewhere.
-  // Nulling them lets the next message re-adopt the target (NULL → new account)
-  // via upsertLineTarget's first-bind + NULL-history adoption.
-  await db.prepare(`UPDATE line_targets SET line_account_id = NULL WHERE line_account_id = ?`).bind(id).run();
-  await db.prepare(`UPDATE target_messages_log SET line_account_id = NULL WHERE line_account_id = ?`).bind(id).run();
-  await db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id).run();
+  // Unbind group/room *targets* (not their history) from the deleted account,
+  // atomically with the delete. The bot never leaves the group when an account
+  // row is deleted, so no LINE event re-scopes the target; leaving it pinned to
+  // a dangling id would hide it from a recreated account. Nulling the target
+  // lets the next message first-bind it to the new owner.
+  //
+  // History rows are deliberately NOT nulled: they keep the (now dangling)
+  // account id so they stay orphaned — invisible to every account's scoped
+  // reads — rather than becoming NULL "legacy" rows that a *different* account
+  // joining the same group id could then adopt (cross-account leak).
+  //
+  // db.batch is atomic: if the DELETE fails (e.g. a non-cascading FK still
+  // references the account), the target unbind rolls back too.
+  await db.batch([
+    db.prepare(`UPDATE line_targets SET line_account_id = NULL WHERE line_account_id = ?`).bind(id),
+    db.prepare(`DELETE FROM line_accounts WHERE id = ?`).bind(id),
+  ]);
 }
 
 export interface UpdateLineAccountFieldsInput {
