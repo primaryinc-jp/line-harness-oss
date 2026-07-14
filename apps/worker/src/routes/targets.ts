@@ -91,8 +91,11 @@ function serializeTargetMessage(m: TargetMessage) {
  * empty means no assertion (back-compat for SDK/MCP callers).
  */
 function assertTargetAccount(requested: string | undefined, owner: string | null): string | null {
-  if (requested === undefined || requested === '') return null;
-  if (requested !== owner) {
+  // Absent = no assertion (back-compat). Empty asserts an unbound (legacy)
+  // target; a value asserts that specific account.
+  if (requested === undefined) return null;
+  const expected = requested === '' ? null : requested;
+  if (expected !== owner) {
     return 'Target ownership changed for this account; reload before viewing';
   }
   return null;
@@ -135,9 +138,13 @@ targets.get('/api/targets', async (c) => {
       }
     }
 
+    // `?lineAccountId=` distinguishes three scopes: absent = all accounts,
+    // a value = that account, empty = unbound (legacy env-token) targets only.
+    const laRaw = c.req.query('lineAccountId');
+    const listAccountScope = laRaw === undefined ? undefined : laRaw === '' ? null : laRaw;
     const { items, total } = await listLineTargets(c.env.DB, {
       targetType: typeParam as TargetType | undefined,
-      lineAccountId: c.req.query('lineAccountId') || undefined,
+      lineAccountId: listAccountScope,
       includeInactive: c.req.query('includeInactive') === 'true',
       metadataFilters,
       limit,

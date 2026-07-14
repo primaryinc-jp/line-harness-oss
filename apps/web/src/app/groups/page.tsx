@@ -142,7 +142,10 @@ export default function GroupsPage() {
     }
     try {
       const params = new URLSearchParams()
-      if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
+      // Empty string = legacy unbound scope (line_account_id IS NULL); a value
+      // scopes to that account. Reaching here with no account means the legacy
+      // install (hasAccounts && !selected already returned above).
+      params.set('lineAccountId', selectedAccountId ?? '')
       if (includeInactive) params.set('includeInactive', 'true')
       params.set('limit', String(PAGE_SIZE))
       params.set('offset', '0')
@@ -182,7 +185,7 @@ export default function GroupsPage() {
     setMoreError(null)
     try {
       const params = new URLSearchParams()
-      if (selectedAccountId) params.set('lineAccountId', selectedAccountId)
+      params.set('lineAccountId', selectedAccountId ?? '') // '' = legacy unbound scope
       if (includeInactive) params.set('includeInactive', 'true')
       params.set('limit', String(nextLimit))
       params.set('offset', '0')
@@ -230,15 +233,16 @@ export default function GroupsPage() {
       // Assert the scope we loaded under: the server rejects (409) if the
       // target's ownership changed to another account, and scopes history +
       // participants to the current owner so a previous owner's rows don't leak.
-      const acct = selectedAccountId ? `&lineAccountId=${encodeURIComponent(selectedAccountId)}` : ''
+      // Empty string asserts the legacy unbound (line_account_id IS NULL) scope.
+      const acct = encodeURIComponent(selectedAccountId ?? '')
+      const type = target.targetType
+      const id = encodeURIComponent(target.targetId)
       const [detailRes, convoRes] = await Promise.all([
         fetchApi<{ success: boolean; data: TargetDetail }>(
-          `/api/targets/${target.targetType}/${encodeURIComponent(target.targetId)}${
-            acct ? `?${acct.slice(1)}` : ''
-          }`,
+          `/api/targets/${type}/${id}?lineAccountId=${acct}`,
         ),
         fetchApi<{ success: boolean; data: { messages: TargetMessage[] } }>(
-          `/api/conversations/${target.targetType}/${encodeURIComponent(target.targetId)}?limit=100${acct}`,
+          `/api/conversations/${type}/${id}?limit=100&lineAccountId=${acct}`,
         ),
       ])
       return {

@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants } from '../src/targets.js';
+import { upsertLineTarget, logTargetMessage, setLineTargetActive, getTargetMessages, getTargetParticipants, listLineTargets } from '../src/targets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, '..');
@@ -307,6 +307,9 @@ describe('901_primaryinc_line_targets.sql', () => {
 
     // Unscoped read still returns everything (back-compat).
     expect(await getTargetMessages(d1, target.id)).toHaveLength(2);
+    // Explicit `undefined` must behave as "no filter", not bind undefined.
+    expect(await getTargetMessages(d1, target.id, { lineAccountId: undefined })).toHaveLength(2);
+    expect(await getTargetParticipants(d1, target.id, undefined)).toHaveLength(2);
 
     // Scoped to the current owner (B): only B-era rows.
     const bMsgs = await getTargetMessages(d1, target.id, { lineAccountId: 'acc-B' });
@@ -338,6 +341,22 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect(nullMsgs.map((m) => m.content)).toEqual(['legacy']);
     const nullParts = await getTargetParticipants(d1, target.id, null);
     expect(nullParts.map((p) => p.displayName)).toEqual(['レガシー']);
+  });
+
+  it('listLineTargets scopes by account: null = unbound only, undefined = all', async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cbound', lineAccountId: 'acc-1' });
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cunbound' }); // no account → NULL
+
+    const all = await listLineTargets(d1, {});
+    expect(all.total).toBe(2);
+
+    // Legacy scope: only unbound targets, never a (possibly deleted) account's.
+    const unbound = await listLineTargets(d1, { lineAccountId: null });
+    expect(unbound.items.map((t) => t.line_target_id)).toEqual(['Cunbound']);
+
+    const bound = await listLineTargets(d1, { lineAccountId: 'acc-1' });
+    expect(bound.items.map((t) => t.line_target_id)).toEqual(['Cbound']);
   });
 
   it('logTargetMessage allows multiple outgoing rows without line_message_id', async () => {

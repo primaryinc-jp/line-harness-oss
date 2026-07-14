@@ -69,7 +69,12 @@ export async function getLineTargetByLineTargetId(
 
 export interface ListLineTargetsOptions {
   targetType?: 'group' | 'room';
-  lineAccountId?: string;
+  /**
+   * Tenant scope: `undefined` = all accounts, a string = that account, `null` =
+   * unbound (line_account_id IS NULL) — the legacy env-token scope, which must
+   * exclude targets still bound to a (possibly since-deleted) account.
+   */
+  lineAccountId?: string | null;
   includeInactive?: boolean;
   /**
    * Exact-match filters on JSON metadata keys, e.g.
@@ -94,9 +99,13 @@ export async function listLineTargets(
     conditions.push('target_type = ?');
     binds.push(targetType);
   }
-  if (lineAccountId) {
-    conditions.push('line_account_id = ?');
-    binds.push(lineAccountId);
+  if (lineAccountId !== undefined) {
+    if (lineAccountId === null) {
+      conditions.push('line_account_id IS NULL');
+    } else {
+      conditions.push('line_account_id = ?');
+      binds.push(lineAccountId);
+    }
   }
   if (!includeInactive) {
     conditions.push('is_active = 1');
@@ -354,7 +363,9 @@ export async function getTargetMessages(
   opts: GetTargetMessagesOptions = {},
 ): Promise<TargetMessage[]> {
   const { limit = 50, before = null, beforeId = null } = opts;
-  const scopeAccount = 'lineAccountId' in opts;
+  // Explicit `undefined` must mean "no filter" (matches the doc contract):
+  // keying on `'lineAccountId' in opts` would bind undefined and D1-error.
+  const scopeAccount = opts.lineAccountId !== undefined;
   // julianday() cursor: preserves sub-second precision and sorts ISO 8601
   // cursors in any timezone form correctly against stored +09:00 timestamps
   // (same rationale as GET /api/conversations/:friendId).
@@ -407,7 +418,9 @@ export async function getTargetParticipants(
   // previous owning account leaking after a group changes hands.
   lineAccountId?: string | null,
 ): Promise<TargetParticipant[]> {
-  const scoped = arguments.length >= 3;
+  // Explicit `undefined` means "no filter" (per the doc contract) — keying on
+  // arguments.length would treat an explicit undefined as a scope and bind it.
+  const scoped = lineAccountId !== undefined;
   const isNull = lineAccountId === null;
   const subClause = !scoped
     ? ''

@@ -122,6 +122,28 @@ describe('GET /api/targets', () => {
     }));
   });
 
+  test('?lineAccountId= (empty) requests the unbound (legacy) scope', async () => {
+    dbMocks.listLineTargets.mockResolvedValue({ items: [], total: 0 });
+    const app = setupApp();
+    const res = await app.request('/api/targets?lineAccountId=');
+    expect(res.status).toBe(200);
+    expect(dbMocks.listLineTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ lineAccountId: null }),
+    );
+  });
+
+  test('absent lineAccountId means all accounts (undefined scope)', async () => {
+    dbMocks.listLineTargets.mockResolvedValue({ items: [], total: 0 });
+    const app = setupApp();
+    const res = await app.request('/api/targets?type=group');
+    expect(res.status).toBe(200);
+    expect(dbMocks.listLineTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ lineAccountId: undefined }),
+    );
+  });
+
   test('rejects unsupported type', async () => {
     const app = setupApp();
     const res = await app.request('/api/targets?type=friend');
