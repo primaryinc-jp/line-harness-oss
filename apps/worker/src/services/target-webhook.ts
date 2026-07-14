@@ -59,9 +59,16 @@ export async function handleTargetEvent(
 
     // Notify sales when the bot is removed from a target linked to a customer —
     // otherwise no one notices the conversation channel is gone. Only fire on a
-    // real active→inactive transition of a linked target.
+    // real active→inactive transition of a target THIS account owns (or a
+    // legacy/unbound one). Without the owner check, account A leaving a group
+    // owned by account B would emit an A notification carrying B's customer/deal
+    // ids (cross-account CRM leak) — and setLineTargetActive no longer even
+    // deactivates B's target on A's leave.
+    const ownerMatches =
+      before?.line_account_id == null || before.line_account_id === lineAccountId;
     const transitioned =
       before?.is_active === 1 &&
+      ownerMatches &&
       (before.membership_updated_at == null || before.membership_updated_at <= event.timestamp);
     if (transitioned && before) {
       let meta: Record<string, unknown> = {};

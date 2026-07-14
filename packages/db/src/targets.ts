@@ -125,7 +125,7 @@ export async function listLineTargets(
   const result = await db
     .prepare(
       `SELECT * FROM line_targets ${where}
-       ORDER BY COALESCE(last_message_at, updated_at) DESC
+       ORDER BY COALESCE(last_message_at, updated_at) DESC, id DESC
        LIMIT ? OFFSET ?`,
     )
     .bind(...binds, limit, offset)
@@ -234,37 +234,53 @@ export async function setLineTargetActive(
       `INSERT INTO line_targets (id, target_type, line_target_id, is_active, line_account_id, membership_updated_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(line_target_id) DO UPDATE SET
+         -- is_active advances only on a not-older membership event. A JOIN
+         -- (excluded.is_active = 1) may always (re)activate; a LEAVE
+         -- (excluded.is_active = 0) may only deactivate a target the LEAVING
+         -- account actually owns — or a legacy/unbound (NULL owner) one. This
+         -- stops account A's leave from deactivating a group still owned (and
+         -- occupied) by account B when both bots share the group.
          is_active = CASE
-           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND (excluded.is_active = 1
+                     OR line_targets.line_account_id IS excluded.line_account_id
+                     OR line_targets.line_account_id IS NULL)
            THEN excluded.is_active ELSE line_targets.is_active END,
          membership_updated_at = CASE
-           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+                AND (excluded.is_active = 1
+                     OR line_targets.line_account_id IS excluded.line_account_id
+                     OR line_targets.line_account_id IS NULL)
            THEN excluded.membership_updated_at ELSE line_targets.membership_updated_at END,
-         -- Ownership follows the membership timestamp: only a newer membership
-         -- event may change the owner, so a stale redelivered join/leave from a
-         -- previous account cannot flip the tenant scope back. First-bind
-         -- (membership_updated_at IS NULL) still works.
+         -- Ownership is (re)assigned only by a JOIN with a not-older timestamp
+         -- (first-bind or a genuine handoff). A LEAVE never claims ownership —
+         -- otherwise A leaving a B-owned group would transfer the tenant scope
+         -- (and its CRM metadata) to A. Stale redelivered joins are guarded by
+         -- the timestamp.
          line_account_id = CASE
-           WHEN line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
            THEN COALESCE(excluded.line_account_id, line_targets.line_account_id)
            ELSE line_targets.line_account_id END,
-         -- On a genuine ownership transfer (a newer membership event moving the
-         -- target from one non-null account to a different one), reset metadata:
+         -- On a genuine JOIN handoff (a newer join moving the target from one
+         -- non-null account to a different one), reset metadata:
          -- salesCustomerPageId/salesDealPageId etc. belong to the previous owner
          -- and must not leak into the new account's CRM associations. First-bind
-         -- (previous owner NULL) and same-owner refreshes keep metadata.
+         -- (previous owner NULL), same-owner refreshes, and leaves keep metadata.
          metadata = CASE
-           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
                 AND line_targets.line_account_id IS NOT NULL
                 AND excluded.line_account_id IS NOT NULL
                 AND excluded.line_account_id <> line_targets.line_account_id
            THEN '{}' ELSE line_targets.metadata END,
-         -- Same handoff condition: the previous owner's last_message_at is not
-         -- the new owner's activity (whose scoped thread is empty until it
+         -- Same JOIN-handoff condition: the previous owner's last_message_at is
+         -- not the new owner's activity (whose scoped thread is empty until it
          -- receives a message), so reset it or the list would sort/label the
          -- target by an unrelated timestamp.
          last_message_at = CASE
-           WHEN (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
+           WHEN excluded.is_active = 1
+                AND (line_targets.membership_updated_at IS NULL OR line_targets.membership_updated_at <= excluded.membership_updated_at)
                 AND line_targets.line_account_id IS NOT NULL
                 AND excluded.line_account_id IS NOT NULL
                 AND excluded.line_account_id <> line_targets.line_account_id

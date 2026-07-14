@@ -167,6 +167,21 @@ describe('handleTargetEvent', () => {
     expect(JSON.parse(arg.metadata).salesCustomerPageId).toBe('cust-1');
   });
 
+  test('leave from a non-owner account does not notify (no cross-account CRM leak)', async () => {
+    // Target owned by acc-B with B's customer link; the leave webhook belongs to
+    // acc-A. A's leave must not emit a notification carrying B's customer id.
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue({
+      ...groupTarget, is_active: 1, membership_updated_at: null, line_account_id: 'acc-B',
+      metadata: JSON.stringify({ salesCustomerPageId: 'cust-B' }),
+    });
+    await handleTargetEvent(
+      db, lineClient(),
+      event({ type: 'leave', timestamp: 1751000000000, source: { type: 'group', groupId: 'Cgroup1' } }),
+      'token', 'acc-A',
+    );
+    expect(dbMocks.createNotification).not.toHaveBeenCalled();
+  });
+
   test('leave does not notify for an unlinked target', async () => {
     dbMocks.getLineTargetByLineTargetId.mockResolvedValue({ ...groupTarget, is_active: 1, metadata: null });
     await handleTargetEvent(

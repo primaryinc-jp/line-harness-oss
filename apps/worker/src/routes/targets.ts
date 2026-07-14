@@ -125,6 +125,20 @@ async function resolveTarget(
   return target;
 }
 
+/**
+ * A target whose owning account row was deleted is "orphaned" and, per the
+ * isolation contract (docs/GROUP_TARGETS.md), inaccessible in every scope — it
+ * must not fall back to another account or the env token. The send path already
+ * refuses it; reads/writes must too, otherwise a client still configured with
+ * the deleted account id could keep viewing or mutating the orphan. Returns
+ * true when the target has a non-null owner that no longer exists.
+ */
+async function ownerAccountMissing(db: D1Database, target: LineTarget): Promise<boolean> {
+  if (!target.line_account_id) return false;
+  const { getLineAccountById } = await import('@line-crm/db');
+  return (await getLineAccountById(db, target.line_account_id)) === null;
+}
+
 // GET /api/targets?type=group|room&lineAccountId=&includeInactive=&limit=&offset=
 targets.get('/api/targets', async (c) => {
   try {
@@ -189,6 +203,10 @@ targets.get('/api/targets/:targetType/:targetId', async (c) => {
     if (!target) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(c.env.DB, target)) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
     const ownershipError = assertTargetAccount(c.req.query('lineAccountId'), target.line_account_id);
     if (ownershipError) return c.json({ success: false, error: ownershipError }, 409);
 
@@ -222,6 +240,10 @@ targets.put('/api/targets/:targetType/:targetId/metadata', async (c) => {
     const db = c.env.DB;
     const target = await resolveTarget(db, targetType, c.req.param('targetId'));
     if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(db, target)) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
 
@@ -267,6 +289,10 @@ targets.get('/api/conversations/:targetType/:targetId', async (c) => {
     const db = c.env.DB;
     const target = await resolveTarget(db, targetType, c.req.param('targetId'));
     if (!target) {
+      return c.json({ success: false, error: 'Target not found' }, 404);
+    }
+    // Orphaned (deleted-owner) targets are invisible in every scope.
+    if (await ownerAccountMissing(db, target)) {
       return c.json({ success: false, error: 'Target not found' }, 404);
     }
 

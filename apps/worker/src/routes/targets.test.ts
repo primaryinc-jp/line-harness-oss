@@ -82,6 +82,10 @@ beforeEach(() => {
   dbMocks.jstNow.mockReturnValue('2026-07-06T12:00:00.000');
   // Staff resolution used by resolveMessageSender (default: send as self)
   dbMocks.getStaffById.mockResolvedValue({ id: 'test-staff', name: 'テスト', is_active: 1, icon_url: null });
+  // Default: the owning account exists (reads/sends check this to keep orphaned
+  // deleted-account targets invisible). clearAllMocks keeps implementations, so
+  // resetting here stops an orphaned-owner test's null from leaking forward.
+  dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'acc-token' });
   // Default: metadata update succeeds, returning the row it wrote (RETURNING).
   // Tests that exercise the ownership-mismatch path override with null.
   dbMocks.updateLineTargetMetadata.mockImplementation(
@@ -226,6 +230,15 @@ describe('GET /api/targets/:targetType/:targetId', () => {
     const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-1');
     expect(res.status).toBe(200);
     expect(dbMocks.getTargetParticipants).toHaveBeenCalledWith(expect.anything(), 'tgt-1', 'acc-1');
+  });
+
+  test('404 when the owning account was deleted (orphaned target is invisible)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineAccountById.mockResolvedValue(null); // acc-1 deleted → orphaned
+    const app = setupApp();
+    const res = await app.request('/api/targets/group/Cabcdef0123456789?lineAccountId=acc-1');
+    expect(res.status).toBe(404);
+    expect(dbMocks.getTargetParticipants).not.toHaveBeenCalled();
   });
 });
 
@@ -379,6 +392,15 @@ describe('GET /api/conversations/:targetType/:targetId', () => {
       'tgt-1',
       expect.objectContaining({ lineAccountId: 'acc-1' }),
     );
+  });
+
+  test('404 when the owning account was deleted (orphaned target has no readable history)', async () => {
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(groupTarget); // owner acc-1
+    dbMocks.getLineAccountById.mockResolvedValue(null); // acc-1 deleted → orphaned
+    const app = setupApp();
+    const res = await app.request('/api/conversations/group/Cabcdef0123456789?limit=50&lineAccountId=acc-1');
+    expect(res.status).toBe(404);
+    expect(dbMocks.getTargetMessages).not.toHaveBeenCalled();
   });
 });
 

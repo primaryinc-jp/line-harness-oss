@@ -496,6 +496,46 @@ describe('901_primaryinc_line_targets.sql', () => {
     expect((await getLineTargetByLineTargetId(d1, 'Cg1'))!.line_account_id).toBe('acc-B');
   });
 
+  it("a non-owner account's leave must not deactivate, transfer, or wipe the owner's target", async () => {
+    const d1 = asD1(db);
+    // Two bots share a group; B owns the target and links a customer.
+    const target = await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    await updateLineTargetMetadata(d1, target.id, JSON.stringify({ salesCustomerPageId: 'cust-B' }));
+
+    // Account A (not the owner) leaves the shared group at a LATER timestamp.
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-A',
+    });
+
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    // B still owns it, it stays active (B's bot is still present), and B's CRM
+    // link is intact — A's leave changed nothing.
+    expect(row.line_account_id).toBe('acc-B');
+    expect(row.is_active).toBe(1);
+    expect(JSON.parse(row.metadata || '{}')).toEqual({ salesCustomerPageId: 'cust-B' });
+  });
+
+  it("the owner's own leave still deactivates its target", async () => {
+    const d1 = asD1(db);
+    await upsertLineTarget(d1, { targetType: 'group', lineTargetId: 'Cg1', lineAccountId: 'acc-B' });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: true,
+      eventTimestamp: Date.UTC(2026, 6, 10, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    await setLineTargetActive(d1, {
+      targetType: 'group', lineTargetId: 'Cg1', isActive: false,
+      eventTimestamp: Date.UTC(2026, 6, 11, 0, 0, 0), lineAccountId: 'acc-B',
+    });
+    const row = (await getLineTargetByLineTargetId(d1, 'Cg1'))!;
+    expect(row.is_active).toBe(0);
+    expect(row.line_account_id).toBe('acc-B');
+  });
+
   it('account deletion orphans its targets/history — never legacy scope, never leaked', async () => {
     // schema.sql (test harness) omits traffic_pools, whose FK cascade fires on
     // line_accounts delete; disable FK enforcement here — production has the

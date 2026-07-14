@@ -102,16 +102,27 @@ POST /api/targets/:targetType/:targetId/messages     # text/image/flex 送信
   fail-closed（エラー）にしている。friend routes への IS NULL 対応は backlog
   （target と同じ 3 値 scope に揃える）
 
-### 残 P2（安全側に倒し済み・磨き込みは backlog）
+### 残 P2 / backlog（安全側に倒し済み・磨き込みは backlog）
 
-所有権の分離は担保済み（P1 なし）。以下は所有者交代直後の稀な UX 粗さで、
-安全側（漏洩なし・誤送信なし）に倒したうえで backlog 管理する。
+所有権の分離・誤送信防止は担保済み（P1 なし）。以下は稀な UX 粗さ・並行性の隅で、
+いずれも安全側（漏洩なし・誤送信なし・データ破損なし）に倒したうえで backlog 管理する。
 
+- **read/write の任意所有権表明（後方互換）**: `lineAccountId` 省略時は所有権を
+  表明しない（後方互換：account 未設定の SDK/env トークン運用）。account を設定した
+  SDK/UI は常に表明するため、クロスアカウント漏洩は「複数 account 環境で、かつ
+  account 未設定の直接 API 呼び出し」という矛盾した構成でのみ起こり得る。厳格化
+  （全 read/write で表明必須）はレガシー運用を壊すため channel-identity 再設計と
+  合わせて backlog
 - **stale-owner の updated_at**: 交代後に旧 account の遅延メッセージが届くと
   `updated_at` が更新され、`COALESCE(last_message_at, updated_at)` 並びで一時的に
   上位に来ることがある（`last_message_at` 自体は所有者一致時のみ更新済み）
-- **複数同時 in-flight 送信の通知保持**: 管理画面は「離脱後に完了した送信結果」を
-  1 件だけ保持する。別 target へ連続送信して両方離脱すると先の通知が上書きされる
+- **並行 webhook の隅**: 同一 leave の同時再配信で通知が二重に出る可能性
+  （所有者一致・遷移時のみ発火まではガード済み。厳密な exactly-once は未対応）／
+  7 日 refresh の同時発火で summary API を重複コール／改名中に開始した古い refresh
+  応答が新名を上書きし得る／reorder された join 移管時に新所有者の `last_message_at`
+  が再集計されず NULL のまま残り得る
+- **会話履歴の older ページング**: 管理画面は最新 100 件のみ取得（それ以前は
+  「未取得」表示）。複合カーソルはあるので UI の older ページングは backlog
 - **遅延失敗送信の下書き復元**: 送信中に target/account を切り替えると下書きは
   クリアされる。再オープン時に失敗/不確定通知は出るが本文は復元されない
 

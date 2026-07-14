@@ -11,6 +11,10 @@ import Header from '@/components/layout/header'
 // UI would tangle both flows. See docs/GROUP_TARGETS.md.
 
 const PAGE_SIZE = 50
+// Conversation history is loaded newest-100 only; the composite (createdAt, id)
+// cursor exists for older pages but this admin view does not page back yet, so
+// it flags truncation instead of pretending the thread is complete.
+const CONVO_LIMIT = 100
 
 interface Target {
   id: string
@@ -126,12 +130,16 @@ export default function GroupsPage() {
   const detailReqRef = useRef(0)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const openedTargetRef = useRef<Target | null>(null)
-  // A send outcome that completed after the operator navigated away. Keyed by
+  // Send outcomes that completed after the operator navigated away, keyed by
   // account + target row id (an ownership transfer keeps the row id, so the
   // account must be part of the key) and surfaced reactively when that exact
   // conversation is open again — so reopening still shows the result and the
-  // operator doesn't blind-resend a group-wide message.
-  const [pendingSend, setPendingSend] = useState<{ key: string; error?: string; notice?: string } | null>(null)
+  // operator doesn't blind-resend a group-wide message. A Map (not a single
+  // slot) so two overlapping in-flight sends to different targets can't drop
+  // each other's outcome.
+  const [pendingSends, setPendingSends] = useState<Map<string, { error?: string; notice?: string }>>(
+    () => new Map(),
+  )
 
   const loadTargets = useCallback(async () => {
     const reqId = ++listReqRef.current
@@ -240,6 +248,10 @@ export default function GroupsPage() {
     // mismatch, so clear their loading flags here or the panes stay stuck.
     setDetailLoading(false)
     setLoadingMore(false)
+    // A send still in flight for the previous scope must not leave the composer
+    // globally disabled — the send's own completion is scope-guarded and won't
+    // touch this scope, so reset the lock here.
+    setSending(false)
     if (accountLoading) return
     loadTargets()
   }, [loadTargets, accountLoading])
@@ -258,7 +270,7 @@ export default function GroupsPage() {
           `/api/targets/${type}/${id}?lineAccountId=${acct}`,
         ),
         fetchApi<{ success: boolean; data: { messages: TargetMessage[] } }>(
-          `/api/conversations/${type}/${id}?limit=100&lineAccountId=${acct}`,
+          `/api/conversations/${type}/${id}?limit=${CONVO_LIMIT}&lineAccountId=${acct}`,
         ),
       ])
       return {
@@ -280,6 +292,7 @@ export default function GroupsPage() {
     setRefreshNotice(null)
     setDetailError(null)
     setDetailLoading(false)
+    setSending(false)
     setShowAllParticipants(false)
   }, [])
 
@@ -295,6 +308,7 @@ export default function GroupsPage() {
       setRefreshNotice(null)
       setDetailError(null)
       setShowAllParticipants(false)
+      setSending(false)
       setDetailLoading(true)
       try {
         const { detail: d, messages: msgs } = await fetchConversation(target)
@@ -385,7 +399,10 @@ export default function GroupsPage() {
         outcome = 'unknown'
       }
     } finally {
-      setSending(false)
+      // Only release the lock for the scope that started this send; if the
+      // operator switched target/account mid-send, that newer scope owns the
+      // flag (and reset it on switch), so this stale completion must not clear it.
+      if (detailReqRef.current === scopeToken) setSending(false)
     }
 
     // The push may have succeeded even though logging it failed, in which case
@@ -410,13 +427,15 @@ export default function GroupsPage() {
       }
     } else {
       const key = scopeKey(sendAccount, target.id)
-      if (outcome === 'failed') {
-        setPendingSend({ key, error: failMessage })
-      } else if (outcome === 'unknown') {
-        setPendingSend({ key, notice: uncertainNotice })
-      } else if (outcome === 'sent') {
-        setPendingSend({ key, notice: '送信は完了しました。' })
-      }
+      const entry =
+        outcome === 'failed'
+          ? { error: failMessage }
+          : outcome === 'unknown'
+            ? { notice: uncertainNotice }
+            : { notice: '送信は完了しました。' }
+      // Keep every pending outcome (Map), so a second overlapping send to a
+      // different target can't overwrite the first target's result.
+      setPendingSends((prev) => new Map(prev).set(key, entry))
     }
 
     // Refresh only if this conversation is still the selected scope.
@@ -483,12 +502,29 @@ export default function GroupsPage() {
   // Surface a send outcome that completed while its conversation was closed,
   // but only when that exact account+target conversation is the one now open.
   useEffect(() => {
-    if (!pendingSend || !detail) return
-    if (pendingSend.key !== scopeKey(selectedAccountId, detail.id)) return
-    if (pendingSend.error) setSendError(pendingSend.error)
-    if (pendingSend.notice) setRefreshNotice(pendingSend.notice)
-    setPendingSend(null)
-  }, [pendingSend, detail, selectedAccountId])
+    if (!detail) return
+    const key = scopeKey(selectedAccountId, detail.id)
+    const entry = pendingSends.get(key)
+    if (!entry) return
+    if (entry.error) setSendError(entry.error)
+    if (entry.notice) setRefreshNotice(entry.notice)
+    setPendingSends((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Map(prev)
+      next.delete(key)
+      return next
+    })
+  }, [pendingSends, detail, selectedAccountId])
+
+  // Render-time scope guard: after an account switch the reset effect runs only
+  // after the render commits, so an already-open detail from the previous
+  // account could paint for a frame. Gate the conversation pane on the detail's
+  // owner matching the selected account so another account's thread is never
+  // shown, even briefly. (Legacy no-accounts installs have a single scope.)
+  const detailInScope =
+    detail && (!hasAccounts || (detail.lineAccountId ?? null) === (selectedAccountId ?? null))
+  // At the cap there are almost certainly older messages the view didn't load.
+  const historyTruncated = messages.length >= CONVO_LIMIT
 
   return (
     <div className="flex flex-col">
@@ -626,7 +662,7 @@ export default function GroupsPage() {
                 </button>
               </div>
             </div>
-          ) : !detail ? (
+          ) : !detailInScope ? (
             <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
               グループを選択してください
             </div>
@@ -682,6 +718,11 @@ export default function GroupsPage() {
               </div>
 
               <div ref={messagesScrollRef} className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+                {historyTruncated && (
+                  <p className="text-center text-[11px] text-gray-400">
+                    最新 {CONVO_LIMIT} 件を表示しています（それ以前のメッセージは未取得）
+                  </p>
+                )}
                 {messages.length === 0 ? (
                   <p className="text-sm text-gray-400">メッセージがありません</p>
                 ) : (
