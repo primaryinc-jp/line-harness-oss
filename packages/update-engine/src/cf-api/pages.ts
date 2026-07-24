@@ -165,6 +165,19 @@ export async function deployPagesProject(opts: {
     }
   }
 
+  // Pages treats these as deployment control files, not static assets. The
+  // admin bundle uses `_worker.js` as a same-origin API proxy so browsers do
+  // not depend on third-party cookies. They must be attached to the final
+  // deployment form; putting them only in the asset manifest serves them as
+  // inert files and silently drops the Function.
+  const pagesWorker = files.get('_worker.js');
+  const routesConfig = files.get('_routes.json');
+  const assetFiles = new Map(
+    Array.from(files.entries()).filter(
+      ([path]) => path !== '_worker.js' && path !== '_routes.json',
+    ),
+  );
+
   // Step 1: upload token (uses API token).
   const jwt = await getUploadToken(creds, projectName);
 
@@ -172,7 +185,7 @@ export async function deployPagesProject(opts: {
   // can rebuild the upload payload from the missing-hashes list.
   const byHash = new Map<string, { path: string; content: NodeBuffer }>();
   const pathToHash = new Map<string, string>();
-  for (const [path, content] of files) {
+  for (const [path, content] of assetFiles) {
     const hash = sha256Hex(content);
     pathToHash.set(path, hash);
     // First-write wins if two files share a hash — same content, doesn't matter which we pick.
@@ -183,7 +196,9 @@ export async function deployPagesProject(opts: {
 
   // Step 3: ask CF which hashes it doesn't already have stored.
   const allHashes = Array.from(new Set(pathToHash.values()));
-  const missing = await checkMissingHashes(jwt, allHashes);
+  const missing = allHashes.length > 0
+    ? await checkMissingHashes(jwt, allHashes)
+    : [];
 
   // Step 4: upload missing assets — skip the call entirely when nothing
   // is missing. CF errors on an empty payload array, and it's a useful
@@ -217,6 +232,20 @@ export async function deployPagesProject(opts: {
 
   const fd = new FormData();
   fd.set('manifest', JSON.stringify(manifest));
+  if (pagesWorker) {
+    fd.set(
+      '_worker.js',
+      new Blob([new Uint8Array(pagesWorker)], { type: 'application/javascript' }),
+      '_worker.js',
+    );
+  }
+  if (routesConfig) {
+    fd.set(
+      '_routes.json',
+      new Blob([new Uint8Array(routesConfig)], { type: 'application/json' }),
+      '_routes.json',
+    );
+  }
   if (branch !== undefined) {
     fd.set('branch', branch);
   }

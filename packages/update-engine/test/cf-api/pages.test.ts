@@ -240,6 +240,47 @@ describe('deployPagesProject', () => {
     expect(fd.get('branch')).toBe('main');
   });
 
+  it('attaches Pages Function control files instead of treating them as static assets', async () => {
+    const indexHtml = Buffer.from('<html/>');
+    const workerJs = Buffer.from('export default { fetch() {} }');
+    const routesJson = Buffer.from('{"version":1,"include":["/api/*"],"exclude":[]}');
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { jwt: 'JWT' } }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: [] }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { id: 'D', url: 'https://x.pages.dev' } }),
+      } as Response);
+
+    await deployPagesProject({
+      creds,
+      projectName: 'p',
+      files: new Map([
+        ['index.html', indexHtml],
+        ['_worker.js', workerJs],
+        ['_routes.json', routesJson],
+      ]),
+    });
+
+    const [, deployInit] = fetchMock.mock.calls[2] as [string, RequestInit];
+    const form = deployInit.body as FormData;
+    const manifest = JSON.parse(String(form.get('manifest')));
+    expect(manifest).toEqual({ '/index.html': sha256Hex(indexHtml) });
+    expect(await (form.get('_worker.js') as File).text()).toBe(workerJs.toString());
+    expect(await (form.get('_routes.json') as File).text()).toBe(routesJson.toString());
+  });
+
   it('uses JWT for check-missing & upload, API token for token & deployment calls', async () => {
     const content = Buffer.from('a');
     const hash = sha256Hex(content);

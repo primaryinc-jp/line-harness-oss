@@ -79,6 +79,7 @@ jobs:
         run: pnpm --filter web build
         env:
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_ADMIN_API_PROXY: 'true'
           NEXT_PUBLIC_UPDATE_BANNER_ENABLED: 'false'
           APP_BUILD_TIME: ${{ steps.build-meta.outputs.build_time }}
 

@@ -85,6 +85,7 @@ jobs:
         # install time (Phase 2 will introduce runtime config to avoid this).
         env:
           NEXT_PUBLIC_API_URL: "https://__LH_WORKER_URL__"
+          NEXT_PUBLIC_ADMIN_API_PROXY: 'true'
           APP_BUILD_TIME: ${{ steps.build-meta.outputs.build_time }}
         run: pnpm --filter web build
 

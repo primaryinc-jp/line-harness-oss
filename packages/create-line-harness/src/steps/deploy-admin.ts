@@ -80,7 +80,9 @@ export async function deployAdmin(
     const buildSpinner = p.spinner();
     buildSpinner.start("Admin UI ビルド中...");
     // Only set the API URL — API key is entered via login page (never embedded in client bundle)
-    const envContent = `NEXT_PUBLIC_API_URL=${options.workerUrl}\n`;
+    const envContent =
+      `NEXT_PUBLIC_API_URL=${options.workerUrl}\n` +
+      `NEXT_PUBLIC_ADMIN_API_PROXY=true\n`;
     writeFileSync(join(webDir, ".env.production"), envContent);
 
     try {

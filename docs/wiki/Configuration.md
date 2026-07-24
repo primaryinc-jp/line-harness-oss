@@ -90,6 +90,7 @@ Next.js 管理画面で必要な環境変数。Vercel / CF Pages のダッシュ
 | 変数名 | 説明 | 例 |
 |--------|------|-----|
 | `NEXT_PUBLIC_API_URL` | Workers API URL | `https://your-worker.your-subdomain.workers.dev` |
+| `NEXT_PUBLIC_ADMIN_API_PROXY` | Pages の同一オリジン API プロキシを使う。本番 Pages は `true` | `true` |
 
 > **セキュリティ注意**: APIキーはログイン画面で入力する方式です。`NEXT_PUBLIC_*` にAPIキーを絶対に設定しないでください。クライアントバンドルに埋め込まれ、第三者から抽出可能になります。
 
@@ -180,7 +181,9 @@ crons = ["0 * * * *"]
 ## CORS 設定
 
 管理画面は Cookie 認証を使うため、CORS は全許可ではなく管理画面の
-Origin だけを許可します。初回セットアップ / アップデート時に
+Origin だけを許可します。本番の管理画面は Pages Function から Worker へ
+同一オリジン中継するため、Safari/iOS の第三者 Cookie 制限にも依存しません。
+初回セットアップ / アップデート時に
 `create-line-harness` が次の Worker シークレットを設定します。
 
 ```bash

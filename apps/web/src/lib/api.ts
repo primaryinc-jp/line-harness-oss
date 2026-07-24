@@ -34,6 +34,7 @@ import type {
   TrafficPool,
   PoolAccount,
 } from '@line-crm/shared'
+import { adminApiUrl } from './admin-api-url'
 
 /** Affiliate offer (案件) as returned by the worker. */
 export type AffiliateOffer = {
@@ -84,14 +85,6 @@ export type BroadcastInsight = {
   fetchedAt?: string | null
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL
-if (!API_URL) {
-  throw new Error(
-    'NEXT_PUBLIC_API_URL is not set. Build cannot proceed without a valid API URL. ' +
-    'Set it in .env.production (local) or GitHub Secrets (CI).'
-  )
-}
-
 /**
  * Read the CSRF token issued at login. The session credential itself lives in
  * an HttpOnly cookie (never exposed to JS); only the CSRF token is held
@@ -121,7 +114,7 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
     const token = getCsrfToken()
     if (token) csrfHeaders['X-CSRF-Token'] = token
   }
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(adminApiUrl(path), {
     ...options,
     // Send the HttpOnly session cookie with every request.
     credentials: 'include',
@@ -1235,7 +1228,7 @@ export const api = {
     // クッキーや Authorization が必要 — 代わりに admin が cache-busting できる
     // タイムスタンプを付けるパターンで利用)。
     externalImageUrl: (richMenuId: string, accountId: string) =>
-      `${API_URL}/api/rich-menu-groups/external/${richMenuId}/image?accountId=${encodeURIComponent(accountId)}`,
+      adminApiUrl(`/api/rich-menu-groups/external/${richMenuId}/image?accountId=${encodeURIComponent(accountId)}`),
 
     applyToTag: (
       groupId: string,
@@ -1254,7 +1247,7 @@ export const api = {
     uploadImage: async (groupId: string, pageId: string, file: File) => {
       const csrf = getCsrfToken();
       const res = await fetch(
-        `${API_URL}/api/rich-menu-groups/${groupId}/pages/${pageId}/image`,
+        adminApiUrl(`/api/rich-menu-groups/${groupId}/pages/${pageId}/image`),
         {
           method: 'POST',
           credentials: 'include',
@@ -1282,7 +1275,7 @@ export const api = {
     //   v1 ではドラフト編集中のプレビュー用 = 認証バイパスでも実害は低いので、
     //   後続 PR で worker 側を whitelist 化する想定。
     imageUrl: (key: string) =>
-      `${API_URL}/api/rich-menu-images/${encodeURIComponent(key)}`,
+      adminApiUrl(`/api/rich-menu-images/${encodeURIComponent(key)}`),
   },
   messageTemplates: {
     list: () =>
