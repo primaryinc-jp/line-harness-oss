@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
+import { adminApiUrl } from '@/lib/admin-api-url'
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter()
@@ -20,8 +21,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     const checkSession = async () => {
       try {
         localStorage.removeItem('lh_api_key')
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL
-        const res = await fetch(`${apiUrl}/api/auth/session`, { credentials: 'include' })
+        const res = await fetch(adminApiUrl('/api/auth/session'), { credentials: 'include' })
         if (!res.ok) throw new Error('unauthenticated')
         const data = await res.json()
         if (!data?.success || !data?.data) throw new Error('unauthenticated')

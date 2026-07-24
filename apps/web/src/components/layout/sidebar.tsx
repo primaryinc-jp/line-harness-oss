@@ -7,6 +7,7 @@ import { useAccount } from '@/contexts/account-context'
 import type { AccountWithStats } from '@/contexts/account-context'
 import { countryFlag } from '@/lib/country-flag'
 import { UNANSWERED_REFRESH_EVENT } from '@/lib/events'
+import { adminApiUrl } from '@/lib/admin-api-url'
 
 const appVersion = process.env.APP_VERSION || '0.0.0'
 const appCommitSha = process.env.APP_COMMIT_SHA || 'local'
@@ -336,13 +337,10 @@ export default function Sidebar() {
         <button
           onClick={async () => {
             try {
-              const apiUrl = process.env.NEXT_PUBLIC_API_URL
-              if (apiUrl) {
-                await fetch(`${apiUrl}/api/auth/logout`, {
-                  method: 'POST',
-                  credentials: 'include',
-                })
-              }
+              await fetch(adminApiUrl('/api/auth/logout'), {
+                method: 'POST',
+                credentials: 'include',
+              })
             } catch {
               // Local cleanup still logs the browser out if the network call fails.
             }

@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { adminApiUrl } from '@/lib/admin-api-url'
 
 export default function LoginPage() {
   const [apiKey, setApiKey] = useState('')
@@ -14,15 +15,9 @@ export default function LoginPage() {
     setError('')
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL
-      if (!apiUrl) {
-        setError('NEXT_PUBLIC_API_URL is not set in build env')
-        setLoading(false)
-        return
-      }
       // Exchange the API key for an HttpOnly session cookie. The key is never
       // stored in localStorage (removes the XSS-exposed credential).
-      const res = await fetch(`${apiUrl}/api/auth/login`, {
+      const res = await fetch(adminApiUrl('/api/auth/login'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
