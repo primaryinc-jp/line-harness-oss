@@ -59,7 +59,10 @@
     "049_tracked_links_short_code.sql",
     "900_primaryinc_message_sender_audit.sql",
     "901_primaryinc_line_targets.sql",
-    "902_primaryinc_target_name_refreshed_at.sql"
+    "902_primaryinc_target_name_refreshed_at.sql",
+    "903_primaryinc_message_delivery_idempotency.sql",
+    "904_primaryinc_message_delivery_guards.sql",
+    "905_primaryinc_message_delivery_resolution_audit.sql"
   ],
-  "migrationCount": 60
+  "migrationCount": 63
 }

@@ -15,8 +15,74 @@ import { fireEvent } from '../services/event-bus.js';
 import { buildMessage } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
 import { MessageSenderError, resolveMessageSender, type SenderSelection } from '../utils/message-sender.js';
+import {
+  finishMessageDelivery,
+  claimMessageDeliveryDispatch,
+  reconcileStaleMessageDelivery,
+  resolveClaimedMessageDelivery,
+  reserveMessageDelivery,
+  sha256Hex,
+} from '../services/message-delivery-idempotency.js';
 
 const friends = new Hono<Env>();
+
+// Manual recovery only: an owner can release a delivery left in_progress by a
+// crashed Worker. It becomes uncertain and is never automatically resent.
+friends.post('/api/message-deliveries/:clientRequestId/reconcile-stale', async (c) => {
+  const staff = c.get('staff');
+  if (staff.role !== 'owner') return c.json({ success: false, error: 'owner role required' }, 403);
+  const body = await c.req.json<{ lineAccountId?: string }>();
+  if (!body.lineAccountId) return c.json({ success: false, error: 'lineAccountId is required' }, 400);
+  const now = new Date();
+  const result = await reconcileStaleMessageDelivery(c.env.DB, {
+    clientRequestId: c.req.param('clientRequestId'),
+    lineAccountId: body.lineAccountId,
+    now: now.toISOString(),
+    staleBefore: new Date(now.getTime() - 15 * 60_000).toISOString(),
+  });
+  if (result === 'not_found') return c.json({ success: false, error: 'delivery not found' }, 404);
+  if (result === 'not_stale') return c.json({ success: false, error: 'delivery is not stale' }, 409);
+  if (result === 'dispatch_started') return c.json({
+    success: false,
+    error: 'delivery dispatch already started; verify the provider result before manual reconciliation',
+  }, 409);
+  return c.json({ success: true, data: { status: result } });
+});
+
+// A dispatch claim means LINE may already have accepted the push. Automatic
+// recovery is unsafe, so an owner must first inspect the provider delivery log
+// and explicitly close the ledger as sent or uncertain.
+friends.post('/api/message-deliveries/:clientRequestId/resolve-dispatch', async (c) => {
+  const staff = c.get('staff');
+  if (staff.role !== 'owner') return c.json({ success: false, error: 'owner role required' }, 403);
+  const body = await c.req.json<{
+    lineAccountId?: string;
+    resolution?: 'sent' | 'uncertain';
+    providerReference?: string;
+  }>();
+  if (!body.lineAccountId) return c.json({ success: false, error: 'lineAccountId is required' }, 400);
+  if (body.resolution !== 'sent' && body.resolution !== 'uncertain') {
+    return c.json({ success: false, error: 'resolution must be sent or uncertain' }, 400);
+  }
+  const providerReference = body.providerReference?.trim();
+  if (body.resolution === 'sent' && (!providerReference || providerReference.length > 200)) {
+    return c.json({ success: false, error: 'providerReference is required for sent resolution' }, 400);
+  }
+  const now = new Date();
+  const result = await resolveClaimedMessageDelivery(c.env.DB, {
+    clientRequestId: c.req.param('clientRequestId'),
+    lineAccountId: body.lineAccountId,
+    resolution: body.resolution,
+    providerReference,
+    resolvedByStaffId: staff.id,
+    now: now.toISOString(),
+    staleBefore: new Date(now.getTime() - 15 * 60_000).toISOString(),
+  });
+  if (result !== 'resolved') {
+    return c.json({ success: false, error: 'claimed delivery is not stale, not in progress, or account does not match' }, 409);
+  }
+  return c.json({ success: true, data: { status: body.resolution } });
+});
 
 /**
  * Convert a D1 snake_case Friend row to the shared camelCase shape.
@@ -545,10 +611,19 @@ friends.post('/api/friends/:id/messages', async (c) => {
       content: string;
       altText?: string;
       trackLinks?: boolean;
+      lineAccountId?: string;
+      clientRequestId?: string;
     } & SenderSelection>();
 
     if (!body.content) {
       return c.json({ success: false, error: 'content is required' }, 400);
+    }
+    const usesSafeDelivery = body.lineAccountId !== undefined || body.clientRequestId !== undefined;
+    if (usesSafeDelivery && (!body.lineAccountId || !body.clientRequestId)) {
+      return c.json({ success: false, error: 'lineAccountId and clientRequestId must be used together' }, 400);
+    }
+    if (body.clientRequestId && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(body.clientRequestId)) {
+      return c.json({ success: false, error: 'invalid clientRequestId' }, 400);
     }
 
     const db = c.env.DB;
@@ -562,41 +637,143 @@ friends.post('/api/friends/:id/messages', async (c) => {
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
     const friendAccountId =
       ((friend as unknown as Record<string, unknown>).line_account_id as string | null) ?? null;
+    if (usesSafeDelivery && friendAccountId !== body.lineAccountId) {
+      return c.json({ success: false, error: 'LINE account ownership changed' }, 409);
+    }
     if (friendAccountId) {
       const { getLineAccountById } = await import('@line-crm/db');
       const account = await getLineAccountById(db, friendAccountId);
+      if (usesSafeDelivery && !account) {
+        return c.json({ success: false, error: 'LINE account not found' }, 409);
+      }
       if (account) accessToken = account.channel_access_token;
     }
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
     const sender = await resolveMessageSender(db, c.get('staff'), body);
 
-    // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
-    // trackLinks=false で明示的に短縮 OFF (URL をそのまま送る)
-    let tracked = { messageType, content: body.content };
-    if (body.trackLinks !== false) {
-      const { autoTrackContent } = await import('../services/auto-track.js');
-      tracked = await autoTrackContent(
-        db, messageType, body.content,
-        c.env.WORKER_URL || new URL(c.req.url).origin,
-        { lineAccountId: friendAccountId },
-      );
+    let reserved = false;
+    if (usesSafeDelivery) {
+      const requestHash = await sha256Hex(JSON.stringify({
+        friendId,
+        lineAccountId: body.lineAccountId,
+        messageType,
+        content: body.content,
+        altText: body.altText ?? null,
+        trackLinks: body.trackLinks !== false,
+        senderMode: body.senderMode ?? null,
+        senderStaffId: body.senderStaffId ?? null,
+      }));
+      const reservation = await reserveMessageDelivery(db, {
+        lineAccountId: body.lineAccountId!,
+        clientRequestId: body.clientRequestId!,
+        friendId,
+        requestHash,
+        now: jstNow(),
+      });
+      if (reservation.kind === 'ownership_mismatch') {
+        return c.json({ success: false, error: 'LINE account ownership changed' }, 409);
+      }
+      if (reservation.kind === 'request_conflict') {
+        return c.json({ success: false, error: 'clientRequestId was already used for a different delivery' }, 409);
+      }
+      if (reservation.kind === 'existing') {
+        if (reservation.status === 'sent') {
+          return c.json({ success: true, data: {
+            messageId: reservation.messageLogId,
+            clientRequestId: body.clientRequestId,
+            lineAccountId: body.lineAccountId,
+            requestHash,
+            idempotent: true,
+          } });
+        }
+        return c.json({
+          success: false,
+          error: `idempotent delivery is ${reservation.status}; reconcile before retry`,
+        }, 409);
+      }
+      reserved = true;
     }
 
-    const message = buildMessage(tracked.messageType, tracked.content, body.altText);
-    await lineClient.pushMessage(friend.line_user_id, [message], sender.lineSender);
+    let deliveryStarted = false;
+    try {
+      // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
+      // trackLinks=false で明示的に短縮 OFF (URL をそのまま送る)
+      let tracked = { messageType, content: body.content };
+      if (body.trackLinks !== false) {
+        const { autoTrackContent } = await import('../services/auto-track.js');
+        tracked = await autoTrackContent(
+          db, messageType, body.content,
+          c.env.WORKER_URL || new URL(c.req.url).origin,
+          { lineAccountId: friendAccountId },
+        );
+      }
 
-    // Log outgoing message
-    const logId = crypto.randomUUID();
-    await db
-      .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, sender_staff_id, sender_name, sender_icon_url, created_at)
-         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'manual', ?, ?, ?, ?)`,
-      )
-      .bind(logId, friend.id, messageType, body.content, sender.staffId, sender.name, sender.iconUrl, jstNow())
-      .run();
+      const message = buildMessage(tracked.messageType, tracked.content, body.altText);
+      if (reserved) {
+        const claimed = await claimMessageDeliveryDispatch(db, {
+          lineAccountId: body.lineAccountId!,
+          clientRequestId: body.clientRequestId!,
+          now: jstNow(),
+        });
+        if (!claimed) throw new Error('idempotent delivery was reconciled before dispatch');
+      }
+      deliveryStarted = true;
+      await lineClient.pushMessage(friend.line_user_id, [message], sender.lineSender);
 
-    return c.json({ success: true, data: { messageId: logId } });
+      // Log outgoing message
+      const logId = crypto.randomUUID();
+      await db
+        .prepare(
+          `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, sender_staff_id, sender_name, sender_icon_url, created_at)
+           VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'manual', ?, ?, ?, ?, ?)`,
+        )
+        .bind(logId, friend.id, messageType, body.content, friendAccountId, sender.staffId, sender.name, sender.iconUrl, jstNow())
+        .run();
+
+      if (reserved) {
+        await finishMessageDelivery(db, {
+          lineAccountId: body.lineAccountId!,
+          clientRequestId: body.clientRequestId!,
+          status: 'sent',
+          messageLogId: logId,
+          now: jstNow(),
+        });
+      }
+      return c.json({ success: true, data: {
+        messageId: logId,
+        ...(usesSafeDelivery ? {
+          clientRequestId: body.clientRequestId,
+          lineAccountId: body.lineAccountId,
+          requestHash: await sha256Hex(JSON.stringify({
+            friendId,
+            lineAccountId: body.lineAccountId,
+            messageType,
+            content: body.content,
+            altText: body.altText ?? null,
+            trackLinks: body.trackLinks !== false,
+            senderMode: body.senderMode ?? null,
+            senderStaffId: body.senderStaffId ?? null,
+          })),
+        } : {}),
+        idempotent: false,
+      } });
+    } catch (deliveryError) {
+      if (reserved) {
+        try {
+          await finishMessageDelivery(db, {
+            lineAccountId: body.lineAccountId!,
+            clientRequestId: body.clientRequestId!,
+            status: deliveryStarted ? 'uncertain' : 'failed',
+            errorCode: deliveryStarted ? 'provider_result_unknown' : 'pre_delivery_failure',
+            now: jstNow(),
+          });
+        } catch (finalizeError) {
+          console.error('Failed to finalize idempotent delivery:', finalizeError);
+        }
+      }
+      throw deliveryError;
+    }
   } catch (err) {
     if (err instanceof MessageSenderError) {
       return c.json({ success: false, error: err.message }, err.status as 400 | 403 | 404);

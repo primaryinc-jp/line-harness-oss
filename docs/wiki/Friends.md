@@ -222,6 +222,19 @@ curl -X POST "https://your-worker.your-subdomain.workers.dev/api/friends/FRIEND_
     "messageType": "image",
     "content": "{\"originalContentUrl\":\"https://example.com/image.jpg\",\"previewImageUrl\":\"https://example.com/image_preview.jpg\"}"
   }'
+
+# account ownership assertion + global idempotency（外部automation推奨）
+curl -X POST "https://your-worker.your-subdomain.workers.dev/api/friends/FRIEND_UUID/messages" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "承認済みメッセージ",
+    "messageType": "text",
+    "senderMode": "official",
+    "trackLinks": false,
+    "lineAccountId": "ACCOUNT_UUID",
+    "clientRequestId": "delivery:STABLE_INTENT_KEY"
+  }'
 ```
 
 リクエストボディ:
@@ -230,13 +243,26 @@ curl -X POST "https://your-worker.your-subdomain.workers.dev/api/friends/FRIEND_
 |-----------|-----|----------|------|
 | `content` | string | — | メッセージ内容（必須） |
 | `messageType` | string | `"text"` | `"text"` / `"flex"` / `"image"` |
+| `lineAccountId` | string | — | `clientRequestId`と同時指定。friendの現在accountが一致しなければ409 |
+| `clientRequestId` | string | — | `lineAccountId`と同時指定。全accountで一意な冪等key |
+| `trackLinks` | boolean | `true` | URL自動変換。request hashへ含まれる |
+
+safe deliveryでは、同じkey・同じrequestの再呼出しは元のreceiptを返し、account/friend/bodyが違うkey再利用は409にする。provider呼出し前の`failed`だけは同じrequestで安全に再試行できる。`in_progress / uncertain` は自動再送せず409を返す。provider dispatch前で15分以上残留した `in_progress` はownerだけが `/api/message-deliveries/:clientRequestId/reconcile-stale` で `uncertain` にできる。
+
+`dispatch_claimed_at` 後にWorkerが停止した場合は、自動reconcileしない。ownerがLINE providerログを照合してから `/api/message-deliveries/:clientRequestId/resolve-dispatch` を呼び、確認できた送信は `{ "lineAccountId": "...", "resolution": "sent", "providerReference": "..." }`、確定不能は `{ "lineAccountId": "...", "resolution": "uncertain" }` とする。どちらも同じkeyを再送可能にはしない。delivery履歴があるfriendの物理削除も禁止し、account再紐付けでglobal keyが消えないようにする。
 
 レスポンス:
 
 ```json
 {
   "success": true,
-  "data": { "messageId": "log-uuid" }
+  "data": {
+    "messageId": "log-uuid",
+    "clientRequestId": "delivery:STABLE_INTENT_KEY",
+    "lineAccountId": "ACCOUNT_UUID",
+    "requestHash": "sha256-hex",
+    "idempotent": false
+  }
 }
 ```
 

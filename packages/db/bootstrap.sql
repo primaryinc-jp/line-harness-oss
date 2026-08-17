@@ -544,6 +544,23 @@ CREATE TABLE menus (
   FOREIGN KEY (auto_tag_id) REFERENCES tags(id) ON DELETE SET NULL
 );
 
+CREATE TABLE message_delivery_idempotency (
+  line_account_id  TEXT NOT NULL,
+  client_request_id TEXT NOT NULL,
+  friend_id        TEXT NOT NULL,
+  request_hash     TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('in_progress', 'sent', 'failed', 'uncertain')),
+  message_log_id   TEXT,
+  error_code       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL, dispatch_claimed_at TEXT, resolved_by_staff_id TEXT,
+  -- A delivery intent key is global. Keeping the account outside the key
+  -- prevents a friend relink from making the same intent sendable again.
+  PRIMARY KEY (client_request_id),
+  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
+  FOREIGN KEY (friend_id) REFERENCES friends(id) ON DELETE RESTRICT
+);
+
 CREATE TABLE message_templates (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -995,6 +1012,12 @@ CREATE INDEX idx_link_clicks_link ON link_clicks (tracked_link_id);
 
 CREATE INDEX idx_menus_account_sort ON menus (line_account_id, sort_order);
 
+CREATE UNIQUE INDEX idx_message_delivery_idempotency_request_global
+  ON message_delivery_idempotency(client_request_id);
+
+CREATE INDEX idx_message_delivery_idempotency_status
+  ON message_delivery_idempotency(status, updated_at);
+
 CREATE INDEX idx_messages_log_broadcast_id ON messages_log(broadcast_id);
 
 CREATE INDEX idx_messages_log_created_at ON messages_log (created_at);
@@ -1061,3 +1084,19 @@ CREATE INDEX idx_users_email ON users (email);
 CREATE INDEX idx_users_external_id ON users (external_id);
 
 CREATE INDEX idx_users_phone ON users (phone);
+
+CREATE TRIGGER prevent_friend_account_change_during_delivery
+BEFORE UPDATE OF line_account_id ON friends
+WHEN OLD.line_account_id IS NOT NEW.line_account_id
+ AND EXISTS (
+   SELECT 1 FROM message_delivery_idempotency mdi
+   WHERE mdi.friend_id = OLD.id AND mdi.status = 'in_progress'
+ )
+BEGIN SELECT RAISE(ABORT, 'friend has an in-progress idempotent delivery'); END;
+
+CREATE TRIGGER prevent_friend_delete_with_delivery_history
+BEFORE DELETE ON friends
+WHEN EXISTS (
+  SELECT 1 FROM message_delivery_idempotency mdi WHERE mdi.friend_id = OLD.id
+)
+BEGIN SELECT RAISE(ABORT, 'friend has message delivery idempotency history'); END;

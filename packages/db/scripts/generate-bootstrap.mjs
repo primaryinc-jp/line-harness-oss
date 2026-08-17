@@ -24,10 +24,23 @@ function isBenignSqliteError(error) {
 }
 
 function splitSqlStatements(sql) {
-  return sql
+  const triggerBlocks = [];
+  const withoutTriggers = sql.replace(
+    /CREATE\s+TRIGGER[\s\S]*?\nEND;/gi,
+    (statement) => {
+      const marker = `__LINE_HARNESS_TRIGGER_${triggerBlocks.length}__`;
+      triggerBlocks.push(statement.trim());
+      return marker;
+    },
+  );
+  return withoutTriggers
     .split(/;\s*(?:\r?\n|$)/)
     .map((statement) => statement.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((statement) => statement.replace(
+      /__LINE_HARNESS_TRIGGER_(\d+)__/g,
+      (_marker, index) => triggerBlocks[Number(index)],
+    ));
 }
 
 function applyMigrationFile(db, fileName) {

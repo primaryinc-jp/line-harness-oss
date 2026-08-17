@@ -82,7 +82,9 @@ https://your-worker.your-subdomain.workers.dev
 | POST | `/api/friends/:id/tags` | タグ追加 | `{ tagId }` |
 | DELETE | `/api/friends/:id/tags/:tagId` | タグ削除 | - |
 | PUT | `/api/friends/:id/metadata` | メタデータ更新 (マージ) | `{ key: value, ... }` |
-| POST | `/api/friends/:id/messages` | メッセージ送信 | `{ content, messageType? }` |
+| POST | `/api/friends/:id/messages` | メッセージ送信。automationはaccount assertion+global idempotencyを使用 | `{ content, messageType?, lineAccountId?, clientRequestId?, trackLinks? }` |
+| POST | `/api/message-deliveries/:clientRequestId/reconcile-stale` | owner限定。15分超のin_progressをuncertainへ解放（再送なし） | `{ lineAccountId }` |
+| POST | `/api/message-deliveries/:clientRequestId/resolve-dispatch` | owner限定。claimから15分経過後、providerログ照合をしてsent/uncertainへ明示確定（再送なし）。owner IDをledgerへ記録 | `{ lineAccountId, resolution, providerReference? }` |
 | POST | `/api/friends/:id/rich-menu` | リッチメニューリンク | `{ richMenuId }` |
 | DELETE | `/api/friends/:id/rich-menu` | リッチメニュー解除 | - |
 | GET | `/api/friends/:id/score` | スコア取得 | - |
