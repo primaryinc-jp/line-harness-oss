@@ -144,6 +144,7 @@ CLI が以下を全部やる:
 ## ドキュメント
 
 - [セットアップガイド (動画)](https://youtu.be/DiRuGaeq1sM)
+- [外部automation向け安全配送capability](docs/wiki/28-Automation-Delivery-Capability.md) — 業務状態を持ち込まないaccount assertion・global idempotency・receipt契約
 - [LINE で無料体験する](https://shudesu.github.io/line-harness-oss/)
 - [npm: @line-harness/sdk](https://www.npmjs.com/package/@line-harness/sdk)
 - [npm: @line-harness/mcp-server](https://www.npmjs.com/package/@line-harness/mcp-server)
