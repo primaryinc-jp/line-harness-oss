@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { splitSqlStatements } from './sql-statements.mjs';
 
 const dbName = process.env.D1_DATABASE_NAME;
 const migrationsDir = resolve(process.env.D1_MIGRATIONS_DIR ?? 'packages/db/migrations');
@@ -35,81 +36,6 @@ function query(command) {
 
 function sqlString(value) {
   return String(value).replaceAll("'", "''");
-}
-
-function splitStatements(sql) {
-  const statements = [];
-  let current = '';
-  let quote = null;
-  let lineComment = false;
-  let blockComment = false;
-
-  for (let i = 0; i < sql.length; i += 1) {
-    const ch = sql[i];
-    const next = sql[i + 1];
-
-    if (lineComment) {
-      current += ch;
-      if (ch === '\n') lineComment = false;
-      continue;
-    }
-
-    if (blockComment) {
-      current += ch;
-      if (ch === '*' && next === '/') {
-        current += next;
-        i += 1;
-        blockComment = false;
-      }
-      continue;
-    }
-
-    if (quote) {
-      current += ch;
-      if (ch === quote) {
-        if (next === quote) {
-          current += next;
-          i += 1;
-        } else {
-          quote = null;
-        }
-      }
-      continue;
-    }
-
-    if (ch === '-' && next === '-') {
-      current += ch + next;
-      i += 1;
-      lineComment = true;
-      continue;
-    }
-
-    if (ch === '/' && next === '*') {
-      current += ch + next;
-      i += 1;
-      blockComment = true;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === '`') {
-      current += ch;
-      quote = ch;
-      continue;
-    }
-
-    if (ch === ';') {
-      const statement = current.trim();
-      if (statement) statements.push(statement);
-      current = '';
-      continue;
-    }
-
-    current += ch;
-  }
-
-  const trailing = current.trim();
-  if (trailing) statements.push(trailing);
-  return statements;
 }
 
 function isAlreadyAppliedError(error) {
@@ -148,7 +74,7 @@ for (const fileName of migrationFiles) {
 
   console.log(`Applying: ${name}`);
   const sql = readFileSync(join(migrationsDir, fileName), 'utf8');
-  const statements = splitStatements(sql);
+  const statements = splitSqlStatements(sql);
 
   for (const statement of statements) {
     if (!hasExecutableSql(statement)) continue;

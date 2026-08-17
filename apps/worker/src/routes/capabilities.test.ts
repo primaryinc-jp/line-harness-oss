@@ -56,11 +56,13 @@ describe('GET /api/capabilities', () => {
     expect(body.data.features).toContain('staff');
     expect(body.data.features).toContain('targets');
     expect(body.data.features).toContain('group_conversations');
+    expect(body.data.features).toContain('message_delivery_idempotency_v1');
     expect(body.data.endpoints.targets).toBe('/api/targets');
+    expect(body.data.endpoints.idempotentFriendMessages).toBe('/api/friends/:id/messages');
     expect(body.data.min_app_version).toBeDefined();
     expect(body.data.product).toBe('line-harness');
     expect(body.data.platform).toBe('line');
-    expect(body.data.connectorVersion).toBe('2026-05-20');
+    expect(body.data.connectorVersion).toBe('2026-08-17');
     expect(body.data.identity.primaryKey).toBe('line_friend_id');
     expect(body.data.identity.supportedLinks).toContain('x_user_id');
     expect(body.data.identity.supportedLinks).toContain('ig_igsid');

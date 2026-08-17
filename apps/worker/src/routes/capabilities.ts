@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
 import type { Env } from '../index.js';
 
-export const HARNESS_VERSION = '0.12.0';
+export const HARNESS_VERSION = '0.13.0';
 export const API_VERSION = 1;
-export const CONNECTOR_VERSION = '2026-05-20';
+export const CONNECTOR_VERSION = '2026-08-17';
 export const MIN_APP_VERSION = '1.0.0';
 export const FEATURES = [
   'friends',
@@ -30,6 +30,8 @@ export const FEATURES = [
   'webhooks',
   'stripe',
   'line_accounts',
+  // Account-scoped, request-hash-bound idempotency for 1:1 messages.
+  'message_delivery_idempotency_v1',
   'line-cross-link',
   'x-cross-link',
   'ig-cross-link',
@@ -73,6 +75,7 @@ capabilities.get('/api/capabilities', async (c) => {
         staffMe: '/api/staff/me',
         lineAccounts: '/api/line-accounts',
         friends: '/api/friends',
+        idempotentFriendMessages: '/api/friends/:id/messages',
         broadcasts: '/api/broadcasts',
         scenarios: '/api/scenarios',
         trackedLinks: '/api/tracked-links',
