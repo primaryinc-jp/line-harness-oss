@@ -6,12 +6,21 @@ import {
 } from './check-migrations';
 
 describe('checkMigration', () => {
-  it('rejects CREATE TRIGGER because its body cannot be split safely', () => {
+  // Both splitters keep trigger bodies whole, so the 900-series delivery
+  // guards are allowed through.
+  it('allows CREATE TRIGGER now that trigger bodies survive splitting', () => {
     const result = checkMigration(
       'CREATE TRIGGER audit AFTER INSERT ON friends BEGIN INSERT INTO logs VALUES (NEW.id); END;',
     );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('still rejects a destructive statement hidden after a trigger body', () => {
+    const result = checkMigration(
+      'CREATE TRIGGER t AFTER INSERT ON friends BEGIN SELECT 1; END;\nDROP TABLE friends;',
+    );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.violation).toContain('CREATE TRIGGER');
+    if (!result.ok) expect(result.violation).toContain('DROP TABLE');
   });
   it('allows CREATE TABLE', () => {
     const sql = `CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT);`;
