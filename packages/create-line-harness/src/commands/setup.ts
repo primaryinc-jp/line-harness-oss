@@ -9,6 +9,7 @@ import { ensureAuth, getAccountId } from "../steps/auth.js";
 import { promptLineCredentials } from "../steps/prompt.js";
 import { createDatabase } from "../steps/database.js";
 import { deployWorker, syncInstalledWorkerConfig } from "../steps/deploy-worker.js";
+import { ensureWorkersDevSubdomain } from "../steps/ensure-subdomain.js";
 import { deployAdmin } from "../steps/deploy-admin.js";
 import { fetchLatestRelease, type FetchedRelease } from "../steps/release-bundle.js";
 import { pinRepoToTag } from "../steps/clone-repo.js";
@@ -40,6 +41,8 @@ interface SetupState {
   r2BucketName?: string;
   workerName?: string;
   accountId?: string;
+  /** line_accounts.id of the row registered in Step 12 (NOT the CF account id) */
+  lineAccountId?: string;
   botBasicId?: string;
   workerUrl?: string;
   adminUrl?: string;
@@ -310,7 +313,7 @@ export async function runSetup(
   repoDir: string,
   options: SetupOptions = {},
 ): Promise<void> {
-  p.intro(pc.bgCyan(pc.black(" LINE Harness セットアップ ")));
+  p.intro(pc.bgCyan(pc.black(" L Harness セットアップ ")));
 
   const state = loadState(repoDir);
 
@@ -611,6 +614,14 @@ async function runSetupInner(
   // locally.
   state.workerName = state.projectName!;
   if (!isDone(state, "worker")) {
+    // New accounts have no workers.dev subdomain and `wrangler deploy` dies
+    // on it non-interactively — check + register (interactively) first.
+    // Not persisted as a step: the check is one cheap GET and re-running it
+    // covers account switches on resume.
+    await ensureWorkersDevSubdomain({
+      accountId: state.accountId!,
+      defaultName: state.projectName!,
+    });
     const { workerUrl } = await deployWorker({
       repoDir,
       d1DatabaseId: state.d1DatabaseId!,
@@ -677,7 +688,7 @@ async function runSetupInner(
       // the CLI working against older databases that resumed an old install.
       const insertSql = `
 INSERT INTO line_accounts (id, channel_id, name, channel_access_token, channel_secret, is_active, created_at, updated_at)
-VALUES (${q(id)}, ${q(state.lineChannelId!)}, ${q("LINE Harness")}, ${q(state.lineChannelAccessToken!)}, ${q(state.lineChannelSecret!)}, 1, ${q(jstNowStr)}, ${q(jstNowStr)})
+VALUES (${q(id)}, ${q(state.lineChannelId!)}, ${q("L Harness")}, ${q(state.lineChannelAccessToken!)}, ${q(state.lineChannelSecret!)}, 1, ${q(jstNowStr)}, ${q(jstNowStr)})
 ON CONFLICT(channel_id) DO UPDATE SET
   channel_access_token = excluded.channel_access_token,
   channel_secret = excluded.channel_secret,
@@ -806,7 +817,39 @@ ON CONFLICT(channel_id) DO UPDATE SET
     message: "MCP 設定を .mcp.json に追加しますか？（Claude Code / Cursor 用）",
   });
   if (addMcp && !p.isCancel(addMcp)) {
-    generateMcpConfig({ workerUrl: state.workerUrl!, apiKey: state.apiKey! });
+    // Resolve the line_accounts.id via wrangler (same authenticated path as
+    // Step 12) so generateMcpConfig doesn't have to HTTP the fresh worker —
+    // new workers.dev subdomains can take minutes to DNS-resolve. The upsert
+    // in Step 12 is ON CONFLICT(channel_id), so a resumed install may keep a
+    // pre-existing row id — always SELECT instead of trusting a generated id.
+    if (!state.lineAccountId && state.d1DatabaseName && state.lineChannelId) {
+      try {
+        const q = (val: string) => `'${val.replace(/'/g, "''")}'`;
+        const out = await wrangler([
+          "d1",
+          "execute",
+          state.d1DatabaseName,
+          "--remote",
+          "--json",
+          "--command",
+          `SELECT id FROM line_accounts WHERE channel_id = ${q(state.lineChannelId)} LIMIT 1`,
+        ]);
+        const jsonStart = out.indexOf("[");
+        const parsed = jsonStart >= 0 ? JSON.parse(out.slice(jsonStart)) : null;
+        const id = parsed?.[0]?.results?.[0]?.id;
+        if (typeof id === "string" && id) {
+          state.lineAccountId = id;
+          saveState(repoDir, state);
+        }
+      } catch {
+        // best-effort — generateMcpConfig falls back to the worker API
+      }
+    }
+    await generateMcpConfig({
+      workerUrl: state.workerUrl!,
+      apiKey: state.apiKey!,
+      accountId: state.lineAccountId,
+    });
   }
 
   // Step 15: Show completion screen
@@ -892,8 +935,8 @@ ON CONFLICT(channel_id) DO UPDATE SET
   p.outro(
     pc.green(
       release
-        ? `LINE Harness v${release.release.version} を使い始めましょう 🎉（更新: npx create-line-harness update）`
-        : "LINE Harness を使い始めましょう 🎉",
+        ? `L Harness v${release.release.version} を使い始めましょう 🎉（更新: npx create-line-harness update）`
+        : "L Harness を使い始めましょう 🎉",
     ),
   );
 }

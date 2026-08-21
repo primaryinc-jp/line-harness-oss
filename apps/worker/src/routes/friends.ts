@@ -6,8 +6,11 @@ import {
   addTagToFriend,
   removeTagFromFriend,
   getFriendTags,
+  getFormSubmissionsByFriend,
   getScenarios,
   enrollFriendInScenario,
+  getMileageSummaryForFriend,
+  getMileageHistoryForFriend,
   jstNow,
 } from '@line-crm/db';
 import type { Friend as DbFriend, Tag as DbTag } from '@line-crm/db';
@@ -457,15 +460,40 @@ friends.get('/api/friends/ref-stats', async (c) => {
   }
 });
 
+// GET /api/friends/:id/mileage - admin wallet summary + recent ledger history
+friends.get('/api/friends/:id/mileage', async (c) => {
+  try {
+    const friendId = c.req.param('id');
+    const friend = await getFriendById(c.env.DB, friendId);
+    if (!friend) {
+      return c.json({ success: false, error: 'Friend not found' }, 404);
+    }
+
+    const requestedLimit = Number.parseInt(c.req.query('limit') ?? '', 10);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 10;
+    const [summary, history] = await Promise.all([
+      getMileageSummaryForFriend(c.env.DB, friendId),
+      getMileageHistoryForFriend(c.env.DB, friendId, { limit }),
+    ]);
+    return c.json({ success: true, data: { summary, history } });
+  } catch (err) {
+    console.error('GET /api/friends/:id/mileage error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 // GET /api/friends/:id - get single friend with tags
 friends.get('/api/friends/:id', async (c) => {
   try {
     const id = c.req.param('id');
     const db = c.env.DB;
 
-    const [friend, tags] = await Promise.all([
+    const [friend, tags, formSubmissions] = await Promise.all([
       getFriendById(db, id),
       getFriendTags(db, id),
+      getFormSubmissionsByFriend(db, id, 10),
     ]);
 
     if (!friend) {
@@ -477,6 +505,14 @@ friends.get('/api/friends/:id', async (c) => {
       data: {
         ...serializeFriend(friend),
         tags: tags.map(serializeTag),
+        formSubmissions: formSubmissions.map((submission) => ({
+          id: submission.id,
+          formId: submission.form_id,
+          formName: submission.form_name,
+          fields: JSON.parse(submission.form_fields || '[]') as unknown[],
+          data: JSON.parse(submission.data || '{}') as Record<string, unknown>,
+          createdAt: submission.created_at,
+        })),
       },
     });
   } catch (err) {
@@ -699,14 +735,26 @@ friends.post('/api/friends/:id/messages', async (c) => {
     try {
       // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
       // trackLinks=false で明示的に短縮 OFF (URL をそのまま送る)
+      const sendWorkerUrl = c.env.WORKER_URL || new URL(c.req.url).origin;
       let tracked = { messageType, content: body.content };
       if (body.trackLinks !== false) {
         const { autoTrackContent } = await import('../services/auto-track.js');
         tracked = await autoTrackContent(
           db, messageType, body.content,
-          c.env.WORKER_URL || new URL(c.req.url).origin,
+          sendWorkerUrl,
           { lineAccountId: friendAccountId },
         );
+      }
+      // 1:1 送信なので /t リンクに f=<friendId> を焼き込み、LIFF 識別ホップなしで
+      // クリック帰属できるようにする（既存 /t リンクにも効くので trackLinks に関わらず実施）
+      // トラッキング系はここ (予約済みの try 内) で行う。失敗しても catch 側が
+      // 予約を failed に落とすので、同じ clientRequestId で再送できる。
+      {
+        const { appendFriendToTrackedLinks } = await import('../services/auto-track.js');
+        tracked = {
+          ...tracked,
+          content: await appendFriendToTrackedLinks(db, tracked.content, sendWorkerUrl, friend.id),
+        };
       }
 
       const message = buildMessage(tracked.messageType, tracked.content, body.altText);
@@ -719,7 +767,13 @@ friends.post('/api/friends/:id/messages', async (c) => {
         if (!claimed) throw new Error('idempotent delivery was reconciled before dispatch');
       }
       deliveryStarted = true;
-      await lineClient.pushMessage(friend.line_user_id, [message], sender.lineSender);
+      await lineClient.pushMessage(
+        friend.line_user_id,
+        [message],
+        undefined,
+        undefined,
+        sender.lineSender,
+      );
 
       // Log outgoing message
       const logId = crypto.randomUUID();

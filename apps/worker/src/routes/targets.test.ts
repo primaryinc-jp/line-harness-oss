@@ -423,7 +423,9 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     expect(pushMessage).toHaveBeenCalledWith(
       'Cabcdef0123456789',
       [{ type: 'text', text: '図面をお送りします' }],
-      undefined,
+      undefined, // retryKey
+      undefined, // customAggregationUnits
+      undefined, // sender (official)
     );
     expect(dbMocks.logTargetMessage).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       targetId: 'tgt-1',
@@ -494,7 +496,9 @@ describe('POST /api/targets/:targetType/:targetId/messages', () => {
     expect(pushMessage).toHaveBeenCalledWith(
       'Cabcdef0123456789',
       [{ type: 'text', text: 'https://example.com' }],
-      undefined,
+      undefined, // retryKey
+      undefined, // customAggregationUnits
+      undefined, // sender (official)
     );
   });
 

@@ -52,6 +52,11 @@ interface Rule {
 }
 
 // Order matters: more specific rules first so messages are useful.
+//
+// CREATE TRIGGER is allowed: both statement splitters that run migrations
+// (scripts/sql-statements.mjs for D1 deploys, packages/update-engine's
+// splitSqlStatements for the update CLI) keep trigger bodies whole. The
+// 900-series delivery guards depend on that.
 const RULES: Rule[] = [
   {
     label: 'DROP TABLE is forbidden (additive-only migrations)',

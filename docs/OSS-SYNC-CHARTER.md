@@ -1,6 +1,6 @@
 # OSS 同期憲章 (OSS Sync Charter)
 
-> LINE Harness プロジェクトにおける Private ↔ OSS リポジトリの同期・運用ルール。
+> L Harness プロジェクトにおける Private ↔ OSS リポジトリの同期・運用ルール。
 > 全コントリビューター・AIエージェントはこの憲章に従うこと。
 
 ---
@@ -272,7 +272,7 @@ gh release create v0.13.0 --repo Shudesu/line-harness-oss --title "v0.13.0" --no
 
 ### 7.4 ダッシュボード表示バージョン
 
-`apps/web/next.config.ts` がビルド時に root `package.json` を読み、`APP_VERSION` env として注入する。サイドバーの `LINE Harness v{APP_VERSION}` 表示はこの値を使う。手動の env 上書き不要。
+`apps/web/next.config.ts` がビルド時に root `package.json` を読み、`APP_VERSION` env として注入する。サイドバーの `L Harness v{APP_VERSION}` 表示はこの値を使う。手動の env 上書き不要。
 
 Admin UI はスクリーンショットだけでデプロイ元を判別できるよう、`APP_COMMIT_SHA` (GitHub Actions の `GITHUB_SHA`、またはローカル git SHA) と `APP_BUILD_TIME` もビルド時に埋め込み、サイドバーに `build <sha> · <UTC time>` として表示する。
 

@@ -17,6 +17,11 @@ import { repoPnpm } from "../lib/pnpm.js";
 
 const WORKERS_DEV_URL = /(https:\/\/[^\s]+\.workers\.dev)/;
 const TTY_REQUIRED = /non[- ]?interactive|cloudflare_api_token|consent denied|authentication error|expired/i;
+// Unregistered workers.dev subdomain. Wrangler prints this alongside a
+// non-interactive-context error (its registration prompt cannot be answered
+// through our pipe), so it would otherwise take the TTY-retry path below and
+// lose the message getHelp() keys on — rethrow immediately instead.
+const WORKERS_DEV_SUBDOMAIN_UNREGISTERED = /register a workers\.dev subdomain/i;
 const RETRYABLE_NETWORK_ERROR =
   /fetch failed|connectivity issue|network connectivity|connection reset|socket hang up/i;
 const MAX_DEPLOY_ATTEMPTS = 3;
@@ -76,6 +81,10 @@ async function deployWorkerBundle(
     return match[1];
   };
 
+  const isSubdomainUnregisteredError = (error: unknown): boolean =>
+    error instanceof WranglerError &&
+    WORKERS_DEV_SUBDOMAIN_UNREGISTERED.test(`${error.message}\n${error.stderr}`);
+
   const isAuthError = (error: unknown): boolean =>
     error instanceof WranglerError &&
     TTY_REQUIRED.test(`${error.message}\n${error.stderr}`);
@@ -97,6 +106,13 @@ async function deployWorkerBundle(
     try {
       return await deployAndParseUrl();
     } catch (firstError) {
+      // No retry can fix an unregistered subdomain — surface the original
+      // WranglerError so setup's top-level catch renders the registration
+      // guidance (WranglerError.getHelp()).
+      if (isSubdomainUnregisteredError(firstError)) {
+        throw firstError;
+      }
+
       if (isAuthError(firstError)) {
         p.log.warn(
           "wrangler の認証を更新するため、対話モードで再実行します（出力が表示されます）...",
@@ -106,6 +122,9 @@ async function deployWorkerBundle(
         try {
           return await deployAndParseUrl();
         } catch (urlError) {
+          if (isSubdomainUnregisteredError(urlError)) {
+            throw urlError;
+          }
           if (
             isRetryableNetworkError(urlError) &&
             attempt < MAX_DEPLOY_ATTEMPTS

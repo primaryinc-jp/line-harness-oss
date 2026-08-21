@@ -411,7 +411,13 @@ targets.post('/api/targets/:targetType/:targetId/messages', async (c) => {
     }
 
     const message = buildMessage(tracked.messageType, tracked.content, body.altText);
-    await lineClient.pushMessage(target.line_target_id, [message], sender.lineSender);
+    await lineClient.pushMessage(
+      target.line_target_id,
+      [message],
+      undefined,
+      undefined,
+      sender.lineSender,
+    );
 
     // Log what was actually pushed (post-tracking, post-buildMessage) — e.g.
     // a broken image/flex payload falls back to text and must be logged as text

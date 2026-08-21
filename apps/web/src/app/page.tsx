@@ -71,6 +71,62 @@ function StatCard({ title, value, loading, icon, href, accentColor = '#06C755' }
   )
 }
 
+// 友だち追加リンクの即時取得カード。/r/dashboard は OS 対応ランディング経由で
+// LINE アプリを直接開く流入口（モバイル: LIFF Universal Link / PC: QR）。
+// UUID 付与・アカウント解決は LIFF 側 /api/liff/link が担い、ref=dashboard が
+// friends.ref_code に流入元として記録される。/auth/line?account= を配らないのは
+// モバイルブラウザで Web 版 LINE ログインが挟まり離脱を生むため
+// (公式の lin.ee 直リンクだと計測も UUID 紐づけも失われるのは従来どおり)。
+function FriendAddLinkCard() {
+  const { selectedAccount } = useAccount()
+  const [copied, setCopied] = useState(false)
+  const base = (process.env.NEXT_PUBLIC_API_URL ?? '').replace(/\/$/, '')
+  const link = selectedAccount
+    ? `${base}/r/dashboard?account=${encodeURIComponent(selectedAccount.channelId)}`
+    : `${base}/r/dashboard`
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {
+      // clipboard requires a secure context; the input below allows manual copy
+    }
+  }
+
+  return (
+    <div className="mb-6 bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <p className="text-sm font-semibold text-gray-800">友だち追加リンク</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {selectedAccount
+              ? `${selectedAccount.displayName || selectedAccount.name} への追加リンク (UUID計測つき)`
+              : 'デフォルトアカウントへの追加リンク (UUID計測つき)'}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-stretch gap-2">
+        <input
+          readOnly
+          value={link}
+          onFocus={(e) => e.currentTarget.select()}
+          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50 text-gray-700 truncate"
+        />
+        <button
+          type="button"
+          onClick={onCopy}
+          className="px-4 rounded-lg text-xs font-medium text-white shrink-0"
+          style={{ backgroundColor: copied ? '#059669' : '#06C755' }}
+        >
+          {copied ? 'コピーしました ✓' : 'コピー'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function DashboardPage() {
   const { selectedAccountId, selectedAccount } = useAccount()
   const [stats, setStats] = useState<DashboardStats>({
@@ -95,7 +151,7 @@ export default function DashboardPage() {
           api.broadcasts.list(),
           api.templates.list(),
           api.automations.list(),
-          api.scoring.rules(),
+          api.mileage.rules(),
         ])
 
         setStats({
@@ -150,6 +206,8 @@ export default function DashboardPage() {
           {error}
         </div>
       )}
+
+      <FriendAddLinkCard />
 
       {/* Demo banner */}
       <a
@@ -240,7 +298,7 @@ export default function DashboardPage() {
           }
         />
         <StatCard
-          title="スコアリングルール数"
+          title="マイル付与ルール数"
           value={stats.scoringRuleCount}
           loading={loading}
           href="/scoring"

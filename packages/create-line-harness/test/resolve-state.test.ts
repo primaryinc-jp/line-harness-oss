@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { resolveState } from '../src/commands/update.js';
+import {
+  findReleaseForAdminRepair,
+  resolveState,
+} from '../src/commands/update.js';
+import type { ReleaseEntry } from '@line-harness/update-engine';
 
 const WORKER_URL = 'https://line-harness.acc.workers.dev';
 
@@ -109,20 +113,30 @@ describe('resolveState — credentials and legacy fallbacks', () => {
   });
 });
 
-// ─── normalizeLiffBindings ────────────────────────────────────────────────────
+// ─── normalizeInstallBindings ─────────────────────────────────────────────────
 
-import { normalizeLiffBindings } from '../src/commands/update.js';
+import { normalizeInstallBindings } from '../src/commands/update.js';
 
-describe('normalizeLiffBindings', () => {
+describe('normalizeInstallBindings', () => {
   const bindings = [
     { type: 'd1' as const, name: 'DB', database_id: 'd1id' },
     { type: 'plain_text' as const, name: 'LIFF_PAGES_PROJECT', text: 'line-harness-liff' },
     { type: 'plain_text' as const, name: 'WORKER_NAME', text: 'line-harness' },
+    {
+      type: 'plain_text' as const,
+      name: 'WORKER_PUBLIC_URL',
+      text: 'https://line-harness.old-sub.workers.dev',
+    },
     { type: 'assets' as const, name: 'ASSETS' },
   ];
 
+  const OPTS = {
+    liffProject: '',
+    workerPublicUrl: 'https://line-harness.old-sub.workers.dev',
+  };
+
   it('clears the stale LIFF_PAGES_PROJECT binding for worker-assets installs', () => {
-    const out = normalizeLiffBindings(bindings, '');
+    const out = normalizeInstallBindings(bindings, OPTS);
     const liff = out.find((b) => b.name === 'LIFF_PAGES_PROJECT');
     expect(liff?.text).toBe('');
     // Everything else passes through untouched.
@@ -131,12 +145,56 @@ describe('normalizeLiffBindings', () => {
   });
 
   it('sets the binding to the real project name for legacy Pages-LIFF installs', () => {
-    const out = normalizeLiffBindings(bindings, 'lh-liff-abc123');
+    const out = normalizeInstallBindings(bindings, {
+      ...OPTS,
+      liffProject: 'lh-liff-abc123',
+    });
     expect(out.find((b) => b.name === 'LIFF_PAGES_PROJECT')?.text).toBe('lh-liff-abc123');
   });
 
+  it('rewrites WORKER_PUBLIC_URL after a subdomain rename', () => {
+    const out = normalizeInstallBindings(bindings, {
+      ...OPTS,
+      workerPublicUrl: 'https://line-harness.new-sub.workers.dev',
+    });
+    expect(out.find((b) => b.name === 'WORKER_PUBLIC_URL')?.text).toBe(
+      'https://line-harness.new-sub.workers.dev',
+    );
+  });
+
   it('does not mutate the input array', () => {
-    normalizeLiffBindings(bindings, '');
+    normalizeInstallBindings(bindings, OPTS);
     expect(bindings.find((b) => b.name === 'LIFF_PAGES_PROJECT')?.text).toBe('line-harness-liff');
+  });
+});
+
+// ─── Admin-only repair release selection ────────────────────────────────────
+
+function release(version: string): ReleaseEntry {
+  return {
+    version,
+    released_at: '2026-07-08T00:00:00Z',
+    worker_hash: `worker-${version}`,
+    admin_hash: `admin-${version}`,
+    liff_hash: `liff-${version}`,
+    worker_bundle_hash: `bundle-${version}`,
+    bundle_url: `https://example.test/${version}.tar.gz`,
+    bundle_size_bytes: 123,
+    required_secrets: [],
+    new_required_secrets: [],
+    migrations: [],
+    changelog_url: 'https://example.test/changelog',
+    min_from_version: '0.0.0',
+  };
+}
+
+describe('findReleaseForAdminRepair', () => {
+  it('selects the artifact matching the live Worker, not the latest release', () => {
+    const releases = [release('0.17.0'), release('0.18.0')];
+    expect(findReleaseForAdminRepair(releases, '0.17.0')?.version).toBe('0.17.0');
+  });
+
+  it('returns undefined instead of deploying a mismatched Admin artifact', () => {
+    expect(findReleaseForAdminRepair([release('0.18.0')], '0.17.0')).toBeUndefined();
   });
 });

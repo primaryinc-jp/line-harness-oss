@@ -205,7 +205,7 @@ function matchConditions(
     if (payload.eventData.tagId !== conditions.tag_id) return false;
   }
 
-  // keyword チェック（message_received イベント用）
+  // keyword チェック（message_received / postback_received イベント用）
   if (conditions.keyword !== undefined && payload.eventData) {
     const text = payload.eventData.text as string | undefined;
     if (!text || !text.includes(conditions.keyword as string)) return false;
@@ -402,7 +402,7 @@ async function executeAction(
 }
 
 /** 送信メッセージを messages_log に記録（失敗しても例外を上げない） */
-async function logOutgoingMessage(
+export async function logOutgoingMessage(
   db: D1Database,
   params: {
     friendId: string;

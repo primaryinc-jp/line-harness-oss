@@ -62,6 +62,41 @@ describe('putWorkerScript metadata', () => {
     expect(metadata.compatibility_flags).toEqual(['nodejs_compat']);
   });
 
+  it('attaches a new assets JWT and adds the ASSETS binding when absent', async () => {
+    await putWorkerScript({
+      creds,
+      scriptName: 'w',
+      scriptContent: Buffer.from('export default {}'),
+      bindings: [{ type: 'd1', name: 'DB', database_id: 'd1id' }],
+      assets: { jwt: 'assets-jwt', binding: 'ASSETS', runWorkerFirst: true },
+    });
+
+    const metadata = await capturedMetadata(fetchMock);
+    expect(metadata.assets).toEqual({
+      jwt: 'assets-jwt',
+      config: { run_worker_first: true },
+    });
+    expect(metadata.bindings).toEqual([
+      { type: 'd1', name: 'DB', database_id: 'd1id' },
+      { type: 'assets', name: 'ASSETS' },
+    ]);
+    expect(metadata).not.toHaveProperty('keep_assets');
+  });
+
+  it('rejects contradictory keepAssets + assets options', async () => {
+    await expect(
+      putWorkerScript({
+        creds,
+        scriptName: 'w',
+        scriptContent: Buffer.from('export default {}'),
+        bindings: BINDINGS,
+        keepAssets: true,
+        assets: { jwt: 'assets-jwt' },
+      }),
+    ).rejects.toThrow(/cannot be used together/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('omits compatibility_flags when the list is empty', async () => {
     await putWorkerScript({
       creds,
@@ -73,6 +108,47 @@ describe('putWorkerScript metadata', () => {
 
     const metadata = await capturedMetadata(fetchMock);
     expect(metadata).not.toHaveProperty('compatibility_flags');
+  });
+
+  // Regression: adoption/update flows re-send the bindings returned by
+  // GET /bindings verbatim. That list contains secret_text entries WITHOUT
+  // their values (CF never returns secret values), and the script upload
+  // API rejects a textless secret_text binding with error 10021
+  // "invalid or missing text property for binding <NAME>". Secrets must
+  // instead be carried over via metadata.keep_bindings.
+  it('drops textless secret_text bindings and inherits them via keep_bindings', async () => {
+    await putWorkerScript({
+      creds,
+      scriptName: 'w',
+      scriptContent: Buffer.from('export default {}'),
+      bindings: [
+        ...BINDINGS,
+        { type: 'secret_text', name: 'ADMIN_ORIGIN' },
+        { type: 'secret_text', name: 'WORKER_URL' },
+        { type: 'secret_key', name: 'SIGNING_KEY' },
+      ],
+    });
+
+    const metadata = await capturedMetadata(fetchMock);
+    expect(metadata.bindings).toEqual(BINDINGS);
+    expect(metadata.keep_bindings).toEqual(['secret_text', 'secret_key']);
+  });
+
+  it('keeps secret_text bindings that carry an explicit text value', async () => {
+    const withValue: WorkerBinding = {
+      type: 'secret_text',
+      name: 'NEW_SECRET',
+      text: 's3cret',
+    };
+    await putWorkerScript({
+      creds,
+      scriptName: 'w',
+      scriptContent: Buffer.from('export default {}'),
+      bindings: [withValue],
+    });
+
+    const metadata = await capturedMetadata(fetchMock);
+    expect(metadata.bindings).toEqual([withValue]);
   });
 
   it('uploads the script bytes unchanged as the worker.js module part', async () => {

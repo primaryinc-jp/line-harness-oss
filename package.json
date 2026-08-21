@@ -1,8 +1,20 @@
 {
   "name": "line-oss-crm",
-  "version": "0.17.0",
+  "version": "0.22.0",
   "private": true,
   "description": "Open-source LINE Official Account CRM/marketing automation",
+  "homepage": "https://the-harness.com/line-harness/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shudesu/line-harness-oss.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Shudesu/line-harness-oss/issues"
+  },
+  "author": {
+    "name": "野田修一 (Shudesu)",
+    "url": "https://the-harness.com/noda-shuichi/"
+  },
   "scripts": {
     "dev:worker": "pnpm --filter worker dev",
     "dev:web": "pnpm --filter web dev",

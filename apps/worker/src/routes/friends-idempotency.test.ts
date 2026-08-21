@@ -18,6 +18,7 @@ vi.mock('../services/step-delivery.js', () => ({
 }));
 vi.mock('../services/auto-track.js', () => ({
   autoTrackContent: vi.fn(async (_db: unknown, messageType: string, content: string) => ({ messageType, content })),
+  appendFriendToTrackedLinks: vi.fn(async (_db: unknown, content: string) => content),
 }));
 vi.mock('../utils/message-sender.js', () => ({
   MessageSenderError: class MessageSenderError extends Error { status = 400; },
