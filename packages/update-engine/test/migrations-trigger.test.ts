@@ -64,4 +64,32 @@ CREATE INDEX idx_c ON t(a);
     expect(statements).toHaveLength(2);
     expect(statements[0]).toContain("VALUES ('END;')");
   });
+
+  // Migration 065 backfills friends with a CASE ... END inside a plain UPDATE.
+  // Depth tracking must ignore it, since no trigger body is open.
+  it('ignores CASE ... END outside a trigger body', () => {
+    const sql = `UPDATE t SET a = CASE WHEN b = 1 THEN 1 ELSE 0 END;\nUPDATE t SET c = 2;`;
+    expect(splitSqlStatements(sql)).toHaveLength(2);
+  });
+
+  it('does not treat identifiers that merely contain the keywords as keywords', () => {
+    const sql = `CREATE TABLE weekend (beginning TEXT, ending TEXT);\nCREATE INDEX idx_w ON weekend(beginning);`;
+    expect(splitSqlStatements(sql)).toHaveLength(2);
+  });
+
+  it('does not open a body for a CREATE TRIGGER mentioned only in a comment', () => {
+    const sql = `-- CREATE TRIGGER documented here, not declared\nCREATE TABLE t (a);\nCREATE TABLE u (b);`;
+    expect(splitSqlStatements(sql)).toHaveLength(2);
+  });
+
+  it('handles two trigger declarations back to back', () => {
+    const sql = [
+      'CREATE TRIGGER a AFTER INSERT ON t BEGIN SELECT 1; END;',
+      'CREATE TRIGGER b AFTER DELETE ON t BEGIN SELECT 2; END;',
+    ].join('\n');
+    const statements = splitSqlStatements(sql);
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain('SELECT 1');
+    expect(statements[1]).toContain('SELECT 2');
+  });
 });
