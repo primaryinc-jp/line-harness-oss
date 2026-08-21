@@ -302,6 +302,7 @@ export interface MessageSender {
 export interface PushMessageRequest {
   to: string;
   messages: Message[];
+  customAggregationUnits?: string[];
 }
 
 export interface MulticastRequest {

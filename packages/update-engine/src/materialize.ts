@@ -88,7 +88,7 @@ export function findResidualPlaceholders(files: Map<string, Buffer>): string[] {
 /**
  * Classify a D1 / SQLite error message as "schema object already exists".
  *
- * LINE Harness migrations are additive-only (enforced by
+ * L Harness migrations are additive-only (enforced by
  * scripts/check-migrations.ts) and use INSERT OR IGNORE for seed data, so
  * re-applying a migration against a database that already has it fails ONLY
  * with duplicate-object errors. Setup has always swallowed these

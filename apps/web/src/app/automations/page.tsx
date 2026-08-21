@@ -6,7 +6,7 @@ import { useAccount } from '@/contexts/account-context'
 import Header from '@/components/layout/header'
 import CcPromptButton from '@/components/cc-prompt-button'
 
-type AutomationEventType = "friend_add" | "tag_change" | "score_threshold" | "cv_fire" | "message_received" | "calendar_booked"
+type AutomationEventType = "friend_add" | "tag_change" | "score_threshold" | "cv_fire" | "message_received" | "postback_received" | "calendar_booked"
 
 interface AutomationAction {
   type: "add_tag" | "remove_tag" | "start_scenario" | "send_message" | "send_webhook" | "switch_rich_menu"
@@ -35,6 +35,7 @@ const eventTypeOptions: { value: AutomationEventType; label: string }[] = [
   { value: 'score_threshold', label: 'スコア閾値' },
   { value: 'cv_fire', label: 'CV発火' },
   { value: 'message_received', label: 'メッセージ受信' },
+  { value: 'postback_received', label: 'ポストバック受信（リッチメニュー等）' },
   { value: 'calendar_booked', label: 'カレンダー予約' },
 ]
 
@@ -44,6 +45,7 @@ const eventTypeLabelMap: Record<AutomationEventType, string> = {
   score_threshold: 'スコア閾値',
   cv_fire: 'CV発火',
   message_received: 'メッセージ受信',
+  postback_received: 'ポストバック受信',
   calendar_booked: 'カレンダー予約',
 }
 
@@ -53,6 +55,7 @@ const eventTypeBadgeColor: Record<AutomationEventType, string> = {
   score_threshold: 'bg-yellow-100 text-yellow-700',
   cv_fire: 'bg-red-100 text-red-700',
   message_received: 'bg-purple-100 text-purple-700',
+  postback_received: 'bg-pink-100 text-pink-700',
   calendar_booked: 'bg-indigo-100 text-indigo-700',
 }
 

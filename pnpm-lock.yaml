@@ -26,6 +26,9 @@ importers:
       '@line/liff':
         specifier: ^2.24.0
         version: 2.28.0
+      hls.js:
+        specifier: ^1.6.16
+        version: 1.6.16
       react:
         specifier: ^19.0.0
         version: 19.2.4
@@ -63,6 +66,9 @@ importers:
       vite:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@25.9.5)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.23.0)
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@25.9.5)(lightningcss@1.32.0)
 
   apps/web:
     dependencies:
@@ -127,6 +133,9 @@ importers:
       '@line-harness/update-engine':
         specifier: workspace:*
         version: link:../../packages/update-engine
+      hls.js:
+        specifier: ^1.6.16
+        version: 1.6.16
       hono:
         specifier: ^4.6.0
         version: 4.12.8
@@ -186,7 +195,7 @@ importers:
         specifier: ^0.9.1
         version: 0.9.1
       '@line-harness/update-engine':
-        specifier: workspace:^0.0.3
+        specifier: workspace:^0.0.11
         version: link:../update-engine
       execa:
         specifier: ^9.5.2
@@ -305,6 +314,9 @@ importers:
 
   packages/update-engine:
     dependencies:
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.3.0
       tar-stream:
         specifier: ^3.2.0
         version: 3.2.0
@@ -2021,6 +2033,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@noble/hashes@2.3.0':
+    resolution: {integrity: sha512-oN+QwyX7VSHotibwubG3kpzbwKrfnyR6OOO+3Nk/53ADL7FmgHHz4TgrbaYKvvOw09u6QTx0oiH1cNCIOuN0CQ==}
+    engines: {node: '>= 20.19.0'}
+
   '@poppinss/colors@4.1.6':
     resolution: {integrity: sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==}
 
@@ -2955,6 +2971,9 @@ packages:
   hasown@2.0.2:
     resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
+
+  hls.js@1.6.16:
+    resolution: {integrity: sha512-VSIRpLfRwlAAdGL4wiTucx2ScRipo0ed1FBatWkyt832jC4CReKstga6yIhYVwGu9LOBjuX9wzmRMeQdBJtzEA==}
 
   hono@4.12.8:
     resolution: {integrity: sha512-VJCEvtrezO1IAR+kqEYnxUOoStaQPGrCmX3j4wDTNOcD1uRPFpGlwQUIW8niPuvHXaTUxeOUl5MMDGrl+tmO9A==}
@@ -5383,6 +5402,8 @@ snapshots:
   '@next/swc-win32-x64-msvc@15.5.14':
     optional: true
 
+  '@noble/hashes@2.3.0': {}
+
   '@poppinss/colors@4.1.6':
     dependencies:
       kleur: 4.1.5
@@ -5694,14 +5715,6 @@ snapshots:
       '@vitest/utils': 2.1.9
       chai: 5.3.3
       tinyrainbow: 1.2.0
-
-  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@22.19.15)(lightningcss@1.32.0))':
-    dependencies:
-      '@vitest/spy': 2.1.9
-      estree-walker: 3.0.3
-      magic-string: 0.30.21
-    optionalDependencies:
-      vite: 5.4.21(@types/node@22.19.15)(lightningcss@1.32.0)
 
   '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.32.0))':
     dependencies:
@@ -6391,6 +6404,8 @@ snapshots:
   hasown@2.0.2:
     dependencies:
       function-bind: 1.1.2
+
+  hls.js@1.6.16: {}
 
   hono@4.12.8: {}
 
@@ -7289,7 +7304,7 @@ snapshots:
   vitest@2.1.9(@types/node@22.19.15)(lightningcss@1.32.0):
     dependencies:
       '@vitest/expect': 2.1.9
-      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.19.15)(lightningcss@1.32.0))
+      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.32.0))
       '@vitest/pretty-format': 2.1.9
       '@vitest/runner': 2.1.9
       '@vitest/snapshot': 2.1.9

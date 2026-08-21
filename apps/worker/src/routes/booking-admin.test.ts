@@ -3,8 +3,12 @@ import { Hono } from 'hono';
 
 const availabilityMocks = {
   computeSlots: vi.fn(() => [] as { start: string; end: string }[]),
-  getAvailability: vi.fn(async () => ({
-    by_staff: [{ staff_id: 's1', display_name: 'A', slots: [] }],
+  getAvailability: vi.fn(async (_db: unknown, params: { from: string }) => ({
+    by_staff: [{
+      staff_id: 's1',
+      display_name: 'A',
+      slots: availabilityMocks.computeSlots().map((slot) => ({ date: params.from, ...slot })),
+    }],
   })),
 };
 vi.mock('../services/availability.js', () => availabilityMocks);
@@ -124,14 +128,20 @@ const execCtx = {
 } as unknown as ExecutionContext;
 
 describe('POST /api/booking/admin/bookings', () => {
-  // 常に「明日の JST 11:00」を使う。固定日付だとその日の 11:00 JST を過ぎた
-  // 時点で past-slot 検証 (422) に落ちるようになり、テストが日付依存で壊れる。
-  const tomorrowUtcDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // Always 7 days in the future at 02:00Z (= JST 11:00, inside the mocked
+  // 10:00-19:00 shift). A fixed date here becomes a time bomb: the route
+  // rejects past slots with 422 once the calendar catches up.
+  const futureStartsAt = (() => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + 7);
+    d.setUTCHours(2, 0, 0, 0);
+    return d.toISOString();
+  })();
   const validBody = {
     friend_id: 'f1',
     menu_id: 'm1',
     staff_id: 's1',
-    starts_at: `${tomorrowUtcDate}T02:00:00.000Z`, // JST 11:00
+    starts_at: futureStartsAt, // JST 11:00
   };
 
   function happyDb(insertChanges = 1) {
@@ -268,29 +278,33 @@ describe('POST /api/booking/admin/bookings', () => {
     expect(body.error).toBe('staff_not_found');
   });
 
-  test('existing-bookings window uses correct JST bounds for a September date', async () => {
+  test('server-side availability recheck receives the correct September JST date', async () => {
     availabilityMocks.computeSlots.mockReturnValue([{ start: '11:00', end: '12:00' }]);
     const db = happyDb();
     const { app, env } = makeApp(db);
+    // September exercises the old `.replace('-09', ...)` mangling bug, but the
+    // year must stay in the future (past slots are rejected with 422 before the
+    // window query runs) — pick this year's Sep 10 or next year's once passed.
+    const now = new Date();
+    const sepYear =
+      now.getTime() < Date.UTC(now.getUTCFullYear(), 8, 1) // before Sep 1
+        ? now.getUTCFullYear()
+        : now.getUTCFullYear() + 1;
     const res = await app.request(
       '/api/booking/admin/bookings?account_id=acc1',
       {
         method: 'POST',
-        body: JSON.stringify({ ...validBody, starts_at: '2026-09-10T02:00:00.000Z' }),
+        body: JSON.stringify({ ...validBody, starts_at: `${sepYear}-09-10T02:00:00.000Z` }),
         headers: { 'Content-Type': 'application/json' },
       },
       env,
       execCtx,
     );
     expect(res.status).toBe(201);
-    // The busy-window query must bind real ISO timestamps, never a corrupted
-    // string from the old `.replace('-09', ...)` (which mangled September dates).
-    const windowQuery = db.calls.find(
-      (c) => c.sql.includes('SELECT starts_at, block_ends_at FROM bookings'),
+    expect(availabilityMocks.getAvailability).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ from: `${sepYear}-09-10`, to: `${sepYear}-09-10` }),
     );
-    const [, endUtc, startUtc] = windowQuery!.params as [string, string, string];
-    expect(startUtc).toBe('2026-09-09T15:00:00.000Z'); // JST 2026-09-10 00:00 = prev-day 15:00Z
-    expect(endUtc).toBe('2026-09-10T15:00:00Z'); // JST 2026-09-11 00:00 = 2026-09-10 15:00Z
   });
 });
 

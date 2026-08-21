@@ -68,3 +68,49 @@ describe('notFoundHandler — root / request', () => {
     expect(assets.fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('notFoundHandler — SPA fallback', () => {
+  // アセットストアに実ファイルが無いパス (LIFF の深いルート) は 404 で返るが、
+  // HTML を要求する GET ナビゲーションに限り index.html を返す。
+  function makeAssets(): Fetcher {
+    return {
+      fetch: vi.fn(async (req: Request) => {
+        const path = new URL(req.url).pathname;
+        if (path === '/') return new Response('<html>index</html>', { status: 200 });
+        return new Response(null, { status: 404 });
+      }),
+    } as unknown as Fetcher;
+  }
+
+  it('serves index.html for a deep-link GET that accepts HTML (/webinar/:slug)', async () => {
+    const assets = makeAssets();
+    const fetchApp = makeApp({ DB: {} as D1Database, ASSETS: assets });
+    const res = await fetchApp('/webinar/harness-day2?liffId=x', {
+      headers: { accept: 'text/html,application/xhtml+xml' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('<html>index</html>');
+    expect(assets.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps 404 for non-HTML requests (missing asset file)', async () => {
+    const assets = makeAssets();
+    const fetchApp = makeApp({ DB: {} as D1Database, ASSETS: assets });
+    const res = await fetchApp('/assets/missing.js', {
+      headers: { accept: '*/*' },
+    });
+    expect(res.status).toBe(404);
+    expect(assets.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps 404 for non-GET methods even when HTML is accepted', async () => {
+    const assets = makeAssets();
+    const fetchApp = makeApp({ DB: {} as D1Database, ASSETS: assets });
+    const res = await fetchApp('/webinar/harness-day2', {
+      method: 'POST',
+      headers: { accept: 'text/html' },
+    });
+    expect(res.status).toBe(404);
+    expect(assets.fetch).toHaveBeenCalledTimes(1);
+  });
+});
