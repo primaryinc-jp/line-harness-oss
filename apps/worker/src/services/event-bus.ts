@@ -25,7 +25,11 @@ import type { Message } from '@line-crm/line-sdk';
 import { sendAdConversions } from './ad-conversion.js';
 
 export interface EventPayload {
+  eventId?: string;
   friendId?: string;
+  conversation?: Record<string, unknown>;
+  sender?: Record<string, unknown>;
+  message?: Record<string, unknown>;
   eventData?: Record<string, unknown>;
   conversionEventName?: string;
   conversionValue?: number;
@@ -76,7 +80,7 @@ export async function fireEvent(
 }
 
 /** 送信Webhookへの通知 */
-async function fireOutgoingWebhooks(
+export async function fireOutgoingWebhooks(
   db: D1Database,
   eventType: string,
   payload: EventPayload,

@@ -8,6 +8,7 @@ import {
   logTargetMessage,
   createNotification,
 } from '@line-crm/db';
+import { fireOutgoingWebhooks } from './event-bus.js';
 
 // Re-fetch a group's display name from the summary API at most this often, so a
 // rename is picked up on a later message without hitting the API every message.
@@ -179,8 +180,10 @@ export async function handleTargetEvent(
   };
 
   let content: string;
+  let notificationText: string;
   if (msg.type === 'text') {
     content = (event.message as TextEventMessage).text;
+    notificationText = content;
   } else {
     const labels: Record<string, string> = {
       sticker: '[スタンプ]',
@@ -190,7 +193,8 @@ export async function handleTargetEvent(
       file: msg.fileName ? `[ファイル: ${msg.fileName}]` : '[ファイル]',
       location: msg.title ? `[位置情報: ${msg.title}]` : '[位置情報]',
     };
-    content = labels[msg.type] ?? `[${msg.type}]`;
+    notificationText = labels[msg.type] ?? `[${msg.type}]`;
+    content = notificationText;
     if (msg.type === 'sticker') {
       const stickerContent = createStickerMessageContent(msg);
       if (stickerContent) content = JSON.stringify(stickerContent);
@@ -222,5 +226,49 @@ export async function handleTargetEvent(
     // real occurrence time — delayed/redelivered webhooks must not reorder
     // the conversation
     occurredAt: event.timestamp,
+  });
+
+  // Group/room messages intentionally bypass the friend event bus so they do
+  // not trigger 1:1 scoring or automations. They still need the outgoing
+  // webhook seam used by the notification relay. Only CRM-linked conversations
+  // are emitted, and a stale event from another account may never carry the
+  // current owner's CRM metadata across the tenant boundary.
+  let metadata: Record<string, unknown> = {};
+  try {
+    metadata = target.metadata ? JSON.parse(target.metadata) as Record<string, unknown> : {};
+  } catch {
+    metadata = {};
+  }
+  const salesDealPageId = typeof metadata.salesDealPageId === 'string'
+    ? metadata.salesDealPageId.trim()
+    : '';
+  const ownerMatches = target.line_account_id === lineAccountId;
+  // Redeliveries are safe to emit: the consumer deduplicates with eventId.
+  // Keeping them preserves a recovery path when LINE retries an event after a
+  // Worker interruption between storing the message and calling this seam.
+  if (!salesDealPageId || !ownerMatches) return;
+
+  await fireOutgoingWebhooks(db, 'target_message_received', {
+    eventId: event.webhookEventId || msg.id,
+    conversation: {
+      type: targetType,
+      id: target.id,
+      lineTargetId,
+      displayName: target.display_name,
+      lineAccountId,
+      salesCustomerPageId: typeof metadata.salesCustomerPageId === 'string'
+        ? metadata.salesCustomerPageId
+        : null,
+      salesDealPageId,
+    },
+    sender: {
+      lineUserId: senderUserId,
+      displayName: senderDisplayName,
+    },
+    message: {
+      id: msg.id,
+      type: msg.type,
+      text: notificationText,
+    },
   });
 }

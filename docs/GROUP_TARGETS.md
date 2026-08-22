@@ -31,6 +31,21 @@ LINE の webhook 再送（redelivery）は LINE message ID
 （`(target_id, line_message_id)` の UNIQUE 制約）で冪等に排除される。
 自動返信・シナリオはグループには適用されない（friend 専用のまま）。
 
+## 受信メッセージの送信 Webhook
+
+`metadata.salesDealPageId` が設定された target の新規受信メッセージは、
+friend用のスコアリング／自動化を動かさず、送信Webhookだけへ
+`target_message_received`イベントとして通知される。payloadには
+`eventId`、target種別・ID・表示名・LINE account ID・sales metadata、
+発言者、メッセージ種別と通知用テキストを含む。画像等の保存先JSONや
+LINE `replyToken`は外へ出さない。LINE redeliveryは同じ`eventId`で再送し、受信側で
+冪等に排除できるようにする。現在のtarget所有者ではないaccount由来の古いイベントは
+送信しない。
+
+送信Webhookでグループ通知を受ける場合は、イベントタイプへ
+`target_message_received`を追加する。グループ内のLINE user IDには顧客／自社
+スタッフのrole情報が無いため、現時点では全メンバーの受信発言が対象になる。
+
 ## API
 
 すべて既存の Bearer 認証（`/api/*`）配下。`:targetId` は harness の行 ID

@@ -463,7 +463,12 @@ describe('POST /webhook — first-contact existing friends', () => {
     expect(fireEvent).toHaveBeenCalledWith(
       db,
       'message_received',
-      expect.objectContaining({ friendId: 'friend-1' }),
+      expect.objectContaining({
+        eventId: 'event-1',
+        friendId: 'friend-1',
+        conversation: expect.objectContaining({ type: 'friend', id: 'friend-1' }),
+        message: expect.objectContaining({ type: 'text', text: 'こんにちは' }),
+      }),
       'env-default-token',
       null,
     );

@@ -630,7 +630,40 @@ async function handleEvent(
     // イベントバス発火: message_received
     // Pass replyToken only when auto_reply didn't actually consume it
     await fireEvent(db, 'message_received', {
+      eventId: event.webhookEventId,
       friendId: friend.id,
+      conversation: {
+        type: 'friend',
+        id: friend.id,
+        displayName: friend.display_name,
+        lineAccountId,
+        ...(() => {
+          try {
+            const metadata = friend.metadata
+              ? JSON.parse(friend.metadata) as Record<string, unknown>
+              : {};
+            return {
+              salesCustomerPageId: typeof metadata.salesCustomerPageId === 'string'
+                ? metadata.salesCustomerPageId
+                : null,
+              salesDealPageId: typeof metadata.salesDealPageId === 'string'
+                ? metadata.salesDealPageId
+                : null,
+            };
+          } catch {
+            return { salesCustomerPageId: null, salesDealPageId: null };
+          }
+        })(),
+      },
+      sender: {
+        lineUserId: friend.line_user_id,
+        displayName: friend.display_name,
+      },
+      message: {
+        id: event.message.id,
+        type: 'text',
+        text: incomingText,
+      },
       eventData: { text: incomingText, matched },
       replyToken: replyTokenConsumed ? undefined : event.replyToken,
     }, lineAccessToken, lineAccountId);

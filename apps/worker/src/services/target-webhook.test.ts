@@ -13,6 +13,8 @@ const dbMocks = {
   createNotification: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
+const eventBusMocks = { fireOutgoingWebhooks: vi.fn() };
+vi.mock('./event-bus.js', () => eventBusMocks);
 
 const { handleTargetEvent } = await import('./target-webhook.js');
 
@@ -46,6 +48,7 @@ function event(e: Record<string, unknown>): WebhookEvent {
 beforeEach(() => {
   vi.clearAllMocks();
   dbMocks.upsertLineTarget.mockResolvedValue(groupTarget);
+  dbMocks.logTargetMessage.mockResolvedValue('message-log-1');
 });
 
 describe('handleTargetEvent', () => {
@@ -115,6 +118,104 @@ describe('handleTargetEvent', () => {
       // real occurrence time drives created_at / last_message_at
       occurredAt: 0,
     }));
+    expect(eventBusMocks.fireOutgoingWebhooks).not.toHaveBeenCalled();
+  });
+
+  test('linked group message emits an outgoing-only notification event with routing metadata', async () => {
+    const linkedTarget = {
+      ...groupTarget,
+      line_account_id: 'acc-1',
+      metadata: JSON.stringify({ salesCustomerPageId: 'customer-7', salesDealPageId: 'deal-9' }),
+    };
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(linkedTarget);
+    dbMocks.upsertLineTarget.mockResolvedValue(linkedTarget);
+
+    await handleTargetEvent(
+      db,
+      lineClient({ getGroupMemberProfile: vi.fn().mockResolvedValue({ displayName: '田中太郎' }) }),
+      event({
+        type: 'message',
+        timestamp: 1751000000000,
+        source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
+        message: { id: 'mid-1', type: 'text', text: '内見できますか' },
+      }),
+      'token',
+      'acc-1',
+    );
+
+    expect(eventBusMocks.fireOutgoingWebhooks).toHaveBeenCalledWith(
+      db,
+      'target_message_received',
+      {
+        eventId: 'we-1',
+        conversation: {
+          type: 'group',
+          id: 'tgt-1',
+          lineTargetId: 'Cgroup1',
+          displayName: '田中家グループ',
+          lineAccountId: 'acc-1',
+          salesCustomerPageId: 'customer-7',
+          salesDealPageId: 'deal-9',
+        },
+        sender: { lineUserId: 'U1', displayName: '田中太郎' },
+        message: { id: 'mid-1', type: 'text', text: '内見できますか' },
+      },
+    );
+  });
+
+  test('a stale account event never emits group notification metadata owned by another account', async () => {
+    const linkedTarget = {
+      ...groupTarget,
+      line_account_id: 'acc-2',
+      metadata: JSON.stringify({ salesDealPageId: 'deal-private' }),
+    };
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(linkedTarget);
+    dbMocks.upsertLineTarget.mockResolvedValue(linkedTarget);
+
+    await handleTargetEvent(
+      db,
+      lineClient({ getGroupMemberProfile: vi.fn().mockRejectedValue(new Error('unavailable')) }),
+      event({
+        type: 'message',
+        deliveryContext: { isRedelivery: true },
+        source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
+        message: { id: 'mid-1', type: 'image' },
+      }),
+      'token',
+      'acc-1',
+    );
+
+    expect(dbMocks.logTargetMessage).toHaveBeenCalled();
+    expect(eventBusMocks.fireOutgoingWebhooks).not.toHaveBeenCalled();
+  });
+
+  test('redelivery re-emits the same event id so the receiver can deduplicate it', async () => {
+    const linkedTarget = {
+      ...groupTarget,
+      line_account_id: 'acc-1',
+      metadata: JSON.stringify({ salesDealPageId: 'deal-9' }),
+    };
+    dbMocks.getLineTargetByLineTargetId.mockResolvedValue(linkedTarget);
+    dbMocks.upsertLineTarget.mockResolvedValue(linkedTarget);
+
+    await handleTargetEvent(
+      db,
+      lineClient({ getGroupMemberProfile: vi.fn().mockRejectedValue(new Error('unavailable')) }),
+      event({
+        type: 'message',
+        deliveryContext: { isRedelivery: true },
+        source: { type: 'group', groupId: 'Cgroup1', userId: 'U1' },
+        message: { id: 'mid-1', type: 'image' },
+      }),
+      'token',
+      'acc-1',
+    );
+
+    expect(eventBusMocks.fireOutgoingWebhooks).toHaveBeenCalledWith(
+      db,
+      'target_message_received',
+      expect.objectContaining({ eventId: 'we-1' }),
+    );
   });
 
   test('room message uses the room member profile API', async () => {

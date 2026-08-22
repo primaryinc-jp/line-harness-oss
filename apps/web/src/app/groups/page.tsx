@@ -89,6 +89,7 @@ export default function GroupsPage() {
   const {
     accounts,
     selectedAccountId,
+    setSelectedAccountId,
     loading: accountLoading,
     error: accountError,
     refreshAccounts,
@@ -130,6 +131,8 @@ export default function GroupsPage() {
   const detailReqRef = useRef(0)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const openedTargetRef = useRef<Target | null>(null)
+  const deepLinkRef = useRef<{ targetId: string; targetType: Target['targetType'] | null; accountId: string | null } | null>(null)
+  const deepLinkInitializedRef = useRef(false)
   // Send outcomes that completed after the operator navigated away, keyed by
   // account + target row id (an ownership transfer keeps the row id, so the
   // account must be part of the key) and surfaced reactively when that exact
@@ -343,6 +346,66 @@ export default function GroupsPage() {
     },
     [fetchConversation, hasAccounts, selectedAccountId],
   )
+
+  // Slack notifications link directly to the relevant conversation. Respect
+  // the account scope before opening the target; otherwise a remembered admin
+  // selection could briefly query another account's group.
+  useEffect(() => {
+    if (!deepLinkInitializedRef.current) {
+      deepLinkInitializedRef.current = true
+      const params = new URLSearchParams(window.location.search)
+      const targetId = params.get('target')
+      const type = params.get('type')
+      if (targetId) {
+        deepLinkRef.current = {
+          targetId,
+          targetType: type === 'group' || type === 'room' ? type : null,
+          accountId: params.get('account'),
+        }
+      }
+    }
+    const link = deepLinkRef.current
+    if (!link || accountLoading) return
+    if (link.accountId) {
+      if (!accounts.some((account) => account.id === link.accountId)) {
+        deepLinkRef.current = null
+        return
+      }
+      if (selectedAccountId !== link.accountId) {
+        setSelectedAccountId(link.accountId)
+        return
+      }
+    }
+    if (loading) return
+    const target = targets.find((item) =>
+      item.targetId === link.targetId && (!link.targetType || item.targetType === link.targetType),
+    )
+    if (target) {
+      deepLinkRef.current = null
+      void openTarget(target)
+      return
+    }
+    // The list is paginated; a notification may point to a conversation beyond
+    // the first page. Resolve it directly instead of leaving a valid deep link
+    // unopened just because it is not in the current list prefix.
+    if (link.targetType) {
+      deepLinkRef.current = null
+      let cancelled = false
+      const account = encodeURIComponent(selectedAccountId ?? '')
+      const targetId = encodeURIComponent(link.targetId)
+      void fetchApi<{ success: boolean; data: Target }>(
+        `/api/targets/${link.targetType}/${targetId}?lineAccountId=${account}`,
+      ).then((response) => {
+        if (!cancelled && response.success) void openTarget(response.data)
+      }).catch(() => {
+        // The normal empty selection remains visible; opening the notification
+        // must never weaken account scoping or guess another target.
+      })
+      return () => {
+        cancelled = true
+      }
+    }
+  }, [accountLoading, accounts, loading, openTarget, selectedAccountId, setSelectedAccountId, targets])
 
   const send = useCallback(async () => {
     if (!detail || !draft.trim()) return
