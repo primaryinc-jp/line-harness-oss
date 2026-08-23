@@ -7,12 +7,21 @@ on:
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
+
+concurrency:
+  group: upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   update:
     if: github.repository != 'Shudesu/line-harness-oss'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UPDATE_BRANCH: upstream/automatic-update
+      CONFLICT_ISSUE_TITLE: '[upstream-sync] Manual conflict resolution required'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +40,8 @@ jobs:
       - name: Detect upstream changes
         id: detect
         run: |
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
@@ -39,32 +50,104 @@ jobs:
 
       - name: Create update branch
         if: steps.detect.outputs.has_changes == 'true'
-        id: branch
-        run: |
-          branch="upstream/update-$(date -u +%Y%m%d-%H%M%S)"
-          git switch -c "$branch"
-          echo "name=$branch" >> "$GITHUB_OUTPUT"
+        run: git switch -C "$UPDATE_BRANCH"
 
       - name: Merge upstream/main
         if: steps.detect.outputs.has_changes == 'true'
+        id: merge
+        continue-on-error: true
         run: |
-          git merge --no-edit upstream/main
+          if git merge --no-edit upstream/main; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Use NUL delimiters and base64 so even unusual filenames cannot
+          # inject shell or GitHub output syntax into a later reporting step.
+          conflicts_b64=$(git diff --name-only --diff-filter=U -z | base64 -w 0)
+          echo "conflicts_b64=$conflicts_b64" >> "$GITHUB_OUTPUT"
+          git merge --abort || true
+          exit 1
 
       - name: Push update branch
-        if: steps.detect.outputs.has_changes == 'true'
+        if: steps.detect.outputs.has_changes == 'true' && steps.merge.outcome == 'success'
         run: |
-          git push origin "${{ steps.branch.outputs.name }}"
+          if git ls-remote --exit-code --heads origin "$UPDATE_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$UPDATE_BRANCH:refs/remotes/origin/$UPDATE_BRANCH"
+            git push --force-with-lease="refs/heads/$UPDATE_BRANCH:refs/remotes/origin/$UPDATE_BRANCH" origin "$UPDATE_BRANCH"
+          else
+            git push origin "$UPDATE_BRANCH"
+          fi
 
-      - name: Open pull request
-        if: steps.detect.outputs.has_changes == 'true'
+      - name: Open or update pull request
+        if: steps.detect.outputs.has_changes == 'true' && steps.merge.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.detect.outputs.upstream_sha }}
         run: |
-          gh pr create \
-            --base main \
-            --head "${{ steps.branch.outputs.name }}" \
-            --title "chore: update from upstream" \
-            --body "This PR imports the latest Shudesu/line-harness-oss main into this fork.\n\nMerge this PR to receive upstream fixes and features, then let the existing Cloudflare deploy workflows update your environment."
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            'This PR imports the latest Shudesu/line-harness-oss main into this fork.' \
+            "Upstream commit: $UPSTREAM_SHA" \
+            'Merge this PR to receive upstream fixes and features, then let the existing Cloudflare deploy workflows update your environment.')
+          pr_number=$(gh pr list --state open --base main --head "$UPDATE_BRANCH" --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" --title "chore: update from upstream" --body "$body"
+          else
+            gh pr create \
+              --base main \
+              --head "$UPDATE_BRANCH" \
+              --title "chore: update from upstream" \
+              --body "$body"
+          fi
+
+      - name: Report merge conflict
+        if: steps.merge.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.detect.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ steps.detect.outputs.upstream_sha }}
+          CONFLICT_FILES_B64: ${{ steps.merge.outputs.conflicts_b64 }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          conflict_files=$(printf '%s' "$CONFLICT_FILES_B64" | base64 --decode | tr '\0' '\n')
+          if [ -z "$conflict_files" ]; then
+            conflict_files='(merge failed before Git reported a conflicted path; inspect the workflow run)'
+          fi
+          body=$(printf '%s\n\n- Fork main: `%s`\n- Upstream main: `%s`\n- Workflow run: %s\n\n%s\n```text\n%s\n```\n\n%s\n' \
+            'The scheduled upstream merge could not be completed automatically.' \
+            "$BASE_SHA" \
+            "$UPSTREAM_SHA" \
+            "$RUN_URL" \
+            'Conflicted files:' \
+            "$conflict_files" \
+            'Resolve these files on a branch from fork main, merge upstream/main, run the repository validation suite, and open a pull request.')
+          issue_number=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg title "$CONFLICT_ISSUE_TITLE" '.[] | select(.title == $title) | .number' \
+            | head -n 1)
+          if [ -n "$issue_number" ]; then
+            gh issue edit "$issue_number" --body "$body"
+          else
+            gh issue create --title "$CONFLICT_ISSUE_TITLE" --body "$body"
+          fi
+
+      - name: Close resolved conflict issue
+        if: always() && (steps.detect.outputs.has_changes == 'false' || steps.merge.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.detect.outputs.upstream_sha }}
+        run: |
+          gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg title "$CONFLICT_ISSUE_TITLE" '.[] | select(.title == $title) | .number' \
+            | while read -r issue_number; do
+                [ -z "$issue_number" ] || gh issue close "$issue_number" \
+                  --comment "Automatic upstream merge is clean at upstream commit $UPSTREAM_SHA."
+              done
+
+      - name: Fail after reporting merge conflict
+        if: steps.merge.outcome == 'failure'
+        run: |
+          echo "Upstream merge conflict was reported in a repository issue."
+          exit 1
 
       - name: No upstream changes
         if: steps.detect.outputs.has_changes == 'false'
