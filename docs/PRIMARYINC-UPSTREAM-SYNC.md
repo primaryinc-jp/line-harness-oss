@@ -17,13 +17,12 @@ review and push-to-`main` deployment gates still apply.
 
 ## Merge conflict
 
-When Git reports a conflict, the workflow aborts the merge and creates or updates
-one open issue named `[upstream-sync] Manual conflict resolution required`. The
-issue records the fork and upstream commit SHAs, the workflow run, and the exact
-conflicted paths. The workflow then fails so repository notifications and Actions
-history also show the problem. The same report is always written to the run summary
-and uploaded as a 14-day artifact, so a repository permission problem cannot hide
-the conflict details even if issue creation fails.
+When Git reports a conflict, the workflow aborts the merge and records the fork and
+upstream commit SHAs, the workflow run, and the exact conflicted paths in the run
+summary and a 14-day `upstream-sync-conflict-*` artifact. It also emits an Actions
+error annotation and fails the job, so repository workflow notifications and
+Actions history show the problem. The repository has GitHub Issues disabled, so
+the workflow does not depend on issue creation for durable reporting.
 
 Resolve the issue from a new branch based on fork `main`:
 
@@ -38,8 +37,8 @@ Review every conflicted shared file against
 [`docs/PR-REVIEW-PLAYBOOK.md`](./PR-REVIEW-PLAYBOOK.md), run Worker CI-equivalent
 checks and `pnpm -r build`, then open a pull request to fork `main`.
 
-On the first later run where upstream is already included or merges cleanly, the
-workflow closes the conflict issue automatically.
+On later runs, an already-included upstream commit exits cleanly; a clean new merge
+refreshes the single automatic update pull request.
 
 ## Fork conflict surface
 

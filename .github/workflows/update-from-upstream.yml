@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
   pull-requests: write
 
 concurrency:
@@ -21,7 +20,6 @@ jobs:
     timeout-minutes: 15
     env:
       UPDATE_BRANCH: upstream/automatic-update
-      CONFLICT_ISSUE_TITLE: '[upstream-sync] Manual conflict resolution required'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,10 +100,7 @@ jobs:
 
       - name: Report merge conflict
         if: steps.merge.outcome == 'failure'
-        id: report
-        continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ steps.detect.outputs.base_sha }}
           UPSTREAM_SHA: ${{ steps.detect.outputs.upstream_sha }}
           CONFLICT_FILES_B64: ${{ steps.merge.outputs.conflicts_b64 }}
@@ -125,14 +120,7 @@ jobs:
             'Resolve these files on a branch from fork main, merge upstream/main, run the repository validation suite, and open a pull request.')
           printf '%s\n' "$body" > "$RUNNER_TEMP/upstream-sync-conflict.md"
           printf '## Upstream sync conflict\n\n%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
-          issue_number=$(gh issue list --state open --limit 100 --json number,title \
-            | jq -r --arg title "$CONFLICT_ISSUE_TITLE" '.[] | select(.title == $title) | .number' \
-            | head -n 1)
-          if [ -n "$issue_number" ]; then
-            gh issue edit "$issue_number" --body "$body"
-          else
-            gh issue create --title "$CONFLICT_ISSUE_TITLE" --body "$body"
-          fi
+          echo "::error title=Upstream sync conflict::Manual resolution is required. See the job summary and upstream-sync-conflict artifact."
 
       - name: Upload merge conflict report
         if: always() && steps.merge.outcome == 'failure'
@@ -143,23 +131,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Close resolved conflict issue
-        if: always() && (steps.detect.outputs.has_changes == 'false' || steps.merge.outcome == 'success')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UPSTREAM_SHA: ${{ steps.detect.outputs.upstream_sha }}
-        run: |
-          gh issue list --state open --limit 100 --json number,title \
-            | jq -r --arg title "$CONFLICT_ISSUE_TITLE" '.[] | select(.title == $title) | .number' \
-            | while read -r issue_number; do
-                [ -z "$issue_number" ] || gh issue close "$issue_number" \
-                  --comment "Automatic upstream merge is clean at upstream commit $UPSTREAM_SHA."
-              done
-
       - name: Fail after reporting merge conflict
         if: always() && steps.merge.outcome == 'failure'
         run: |
-          echo "Upstream merge conflict was reported in a repository issue."
+          echo "Upstream merge conflict was recorded in the job summary and artifact."
           exit 1
 
       - name: No upstream changes
