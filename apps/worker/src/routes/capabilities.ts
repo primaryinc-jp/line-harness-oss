@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import type { Env } from '../index.js';
 
-export const HARNESS_VERSION = '0.13.0';
+// Kept in lockstep with root package.json by scripts/sync-versions.sh, which the
+// pre-push hook verifies. Bumping this by hand alone will fail that check.
+export const HARNESS_VERSION = '0.22.0';
 export const API_VERSION = 1;
 export const CONNECTOR_VERSION = '2026-08-17';
 export const MIN_APP_VERSION = '1.0.0';

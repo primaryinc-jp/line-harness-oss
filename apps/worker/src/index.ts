@@ -17,6 +17,7 @@ import {
 } from '@line-crm/db';
 import { processStepDeliveries } from './services/step-delivery.js';
 import { processScheduledBroadcasts, processQueuedBroadcasts } from './services/broadcast.js';
+import { startBulkSendJobs } from './services/quota.js';
 import { processReminderDeliveries } from './services/reminder-delivery.js';
 import { checkAccountHealth } from './services/ban-monitor.js';
 import { refreshLineAccessTokens } from './services/token-refresh.js';
@@ -26,6 +27,7 @@ import { runExpirer } from './services/booking-expirer.js';
 import { processDueEventReminders } from './services/event-booking-reminders.js';
 import { processDueMeetConsultationReminders } from './services/meet-consultation-reminders.js';
 import { runEventBookingExpirer } from './services/event-booking-expirer.js';
+import { logRetentionDays } from './services/log-retention.js';
 import { sendEventBookingNotification } from './services/event-booking-notifier.js';
 import { sendBookingNotification } from './services/booking-notifier.js';
 import { DEFAULT_ACCOUNT_SETTINGS } from './services/booking-types.js';
@@ -43,6 +45,7 @@ import { affiliates } from './routes/affiliates.js';
 import { affiliateOffers } from './routes/affiliate-offers.js';
 import { duplicates } from './routes/duplicates.js';
 import { usersGrouped } from './routes/users-grouped.js';
+import { usage } from './routes/usage.js';
 import { inbox } from './routes/inbox.js';
 import { openapi } from './routes/openapi.js';
 import { liffRoutes } from './routes/liff.js';
@@ -150,6 +153,14 @@ export type Env = {
     // the Worker keeps a refresh token and never needs a service-account key.
     GOOGLE_OAUTH_CLIENT_ID?: string;
     GOOGLE_OAUTH_CLIENT_SECRET?: string;
+    /** Days to keep messages_log rows. Unset/invalid = keep forever. */
+    LOG_RETENTION_DAYS?: string;
+    /** Max friends (is_following=1). Unset/invalid = unlimited. */
+    QUOTA_FRIENDS_MAX?: string;
+    /** Max outgoing push messages per JST month. Unset/invalid = unlimited. */
+    QUOTA_MONTHLY_MESSAGES_MAX?: string;
+    /** Optional URL shown to admins when a quota is exceeded. */
+    QUOTA_NOTICE_URL?: string;
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
@@ -204,6 +215,7 @@ app.route('/', affiliates);
 app.route('/', affiliateOffers);
 app.route('/', duplicates);
 app.route('/', usersGrouped);
+app.route('/', usage);
 app.route('/', inbox);
 app.route('/', openapi);
 app.route('/', liffRoutes);
@@ -1065,13 +1077,18 @@ async function scheduled(
   // (barrier 化すると長い scheduled 送信が queue 処理を待たせる)。scheduled dedup は
   // status='sending', batch_offset=0 に enqueue され、同 tick もしくは次 tick (最大5分、
   // 5分 cron の粒度内) で processQueuedBroadcasts に拾われて分割送信される。
+  //
+  // 例外: 月間送信上限が設定されているときだけ、この配信3ジョブは
+  // startBulkSendJobs が直列 (queued → scheduled → step) に切り替える。並列だと
+  // 各ジョブが自分のスナップショットしか見ず合算で上限を超えられるため。
+  // リマインダー等クォータ対象外のジョブは従来どおり常に並列。
   const jobs = [];
-  jobs.push(
-    processStepDeliveries(env.DB, defaultLineClient, env.WORKER_URL),
-    processScheduledBroadcasts(env.DB, defaultLineClient, env.WORKER_URL),
-    processReminderDeliveries(env.DB, defaultLineClient),
-  );
-  jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
+  jobs.push(...startBulkSendJobs(env, [
+    () => processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL, env),
+    () => processScheduledBroadcasts(env.DB, defaultLineClient, env.WORKER_URL, env),
+    () => processStepDeliveries(env.DB, defaultLineClient, env.WORKER_URL, env),
+  ]));
+  jobs.push(processReminderDeliveries(env.DB, defaultLineClient));
   jobs.push(checkAccountHealth(env.DB));
 
   // Mileage is an eventually-consistent projection. Reuse the existing
@@ -1138,6 +1155,22 @@ async function scheduled(
       );
     } catch (e) {
       console.error('event-booking-expirer error:', e);
+    }
+
+    // Message-log retention (opt-in via LOG_RETENTION_DAYS; unset = keep forever).
+    // Runs last: it only frees storage, so every delivery job outranks it.
+    if (logRetentionDays(env) > 0) {
+      try {
+        const { runLogRetention } = await import('./services/log-retention.js');
+        const res = await runLogRetention(env.DB, env.IMAGES, env);
+        if (res.archived > 0) {
+          console.log(
+            `log-retention: archived ${res.archived} rows in ${res.batches} batch(es)`,
+          );
+        }
+      } catch (err) {
+        console.error('log-retention failed:', err);
+      }
     }
   }
 
