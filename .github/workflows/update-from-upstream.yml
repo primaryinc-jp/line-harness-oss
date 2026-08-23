@@ -102,6 +102,8 @@ jobs:
 
       - name: Report merge conflict
         if: steps.merge.outcome == 'failure'
+        id: report
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ steps.detect.outputs.base_sha }}
@@ -121,6 +123,8 @@ jobs:
             'Conflicted files:' \
             "$conflict_files" \
             'Resolve these files on a branch from fork main, merge upstream/main, run the repository validation suite, and open a pull request.')
+          printf '%s\n' "$body" > "$RUNNER_TEMP/upstream-sync-conflict.md"
+          printf '## Upstream sync conflict\n\n%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
           issue_number=$(gh issue list --state open --limit 100 --json number,title \
             | jq -r --arg title "$CONFLICT_ISSUE_TITLE" '.[] | select(.title == $title) | .number' \
             | head -n 1)
@@ -129,6 +133,15 @@ jobs:
           else
             gh issue create --title "$CONFLICT_ISSUE_TITLE" --body "$body"
           fi
+
+      - name: Upload merge conflict report
+        if: always() && steps.merge.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-conflict-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstream-sync-conflict.md
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Close resolved conflict issue
         if: always() && (steps.detect.outputs.has_changes == 'false' || steps.merge.outcome == 'success')
@@ -144,7 +157,7 @@ jobs:
               done
 
       - name: Fail after reporting merge conflict
-        if: steps.merge.outcome == 'failure'
+        if: always() && steps.merge.outcome == 'failure'
         run: |
           echo "Upstream merge conflict was reported in a repository issue."
           exit 1

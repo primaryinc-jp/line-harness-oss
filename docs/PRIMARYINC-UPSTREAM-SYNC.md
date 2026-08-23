@@ -21,7 +21,9 @@ When Git reports a conflict, the workflow aborts the merge and creates or update
 one open issue named `[upstream-sync] Manual conflict resolution required`. The
 issue records the fork and upstream commit SHAs, the workflow run, and the exact
 conflicted paths. The workflow then fails so repository notifications and Actions
-history also show the problem.
+history also show the problem. The same report is always written to the run summary
+and uploaded as a 14-day artifact, so a repository permission problem cannot hide
+the conflict details even if issue creation fails.
 
 Resolve the issue from a new branch based on fork `main`:
 
