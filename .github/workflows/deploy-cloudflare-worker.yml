@@ -101,14 +101,9 @@ jobs:
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
           D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
           WORKER_NAME: ${{ vars.WORKER_NAME || 'your-worker-name' }}
-          # Admin CORS config — set these as repo Variables when the admin panel
-          # and the Worker API are on different origins (e.g. *.pages.dev admin
-          # + *.workers.dev API). Baking them into the deployed config (vars)
-          # means every deploy carries them, so they can't be silently dropped
-          # the way a manually-set dashboard variable is on redeploy.
-          ADMIN_ORIGIN: ${{ vars.ADMIN_ORIGIN }}
-          ADMIN_ALLOW_CROSS_SITE: ${{ vars.ADMIN_ALLOW_CROSS_SITE }}
-          WORKER_URL: ${{ vars.WORKER_URL }}
+          ADMIN_ORIGIN: ${{ secrets.ADMIN_ORIGIN }}
+          ADMIN_ALLOW_CROSS_SITE: ${{ secrets.ADMIN_ALLOW_CROSS_SITE }}
+          WORKER_URL: ${{ secrets.WORKER_URL || secrets.NEXT_PUBLIC_API_URL }}
         run: |
           test -n "$D1_DATABASE_ID"
           cd apps/worker
@@ -117,24 +112,18 @@ jobs:
             -e "s|\"database_name\":\"[^\"]*\"|\"database_name\":\"${D1_DATABASE_NAME}\"|g" \
             -e "s|\"database_id\":\"[^\"]*\"|\"database_id\":\"${D1_DATABASE_ID}\"|g" \
             dist/line_harness/wrangler.json
-          # Preserve the live deployment settings instead of uploading the
-          # development placeholders from wrangler.toml. --keep-vars retains
-          # variables not explicitly overridden by the CORS settings below.
+          # Keep live variables instead of uploading development placeholders.
           tmp="$(mktemp)"
           jq '.vars = {}' dist/line_harness/wrangler.json > "$tmp"
           mv "$tmp" dist/line_harness/wrangler.json
-          # Inject admin CORS vars into the deployed config when ADMIN_ORIGIN is
-          # set. ADMIN_ALLOW_CROSS_SITE defaults to "true" (SameSite=None; Secure
-          # cookies) since cross-origin admin/API is the case that needs it.
-          if [ -n "$ADMIN_ORIGIN" ]; then
-            tmp="$(mktemp)"
-            jq --arg o "$ADMIN_ORIGIN" --arg x "$ADMIN_ALLOW_CROSS_SITE" --arg w "$WORKER_URL" '
-              .vars.ADMIN_ORIGIN = $o
-              | .vars.ADMIN_ALLOW_CROSS_SITE = (if $x == "" then "true" else $x end)
-              | (if $w != "" then .vars.WORKER_URL = $w else . end)
-            ' dist/line_harness/wrangler.json > "$tmp" && mv "$tmp" dist/line_harness/wrangler.json
-            echo "Patched admin CORS vars: ADMIN_ORIGIN=$ADMIN_ORIGIN ADMIN_ALLOW_CROSS_SITE=${ADMIN_ALLOW_CROSS_SITE:-true}"
-          fi
+          # Upload auth configuration atomically with the Worker, preserving
+          # secret binding types and avoiding a second deployment per secret.
+          test -n "$WORKER_URL"
+          test -n "$ADMIN_ORIGIN"
+          test -n "$ADMIN_ALLOW_CROSS_SITE"
+          umask 077
+          jq -n '{WORKER_URL: env.WORKER_URL, ADMIN_ORIGIN: env.ADMIN_ORIGIN,
+            ADMIN_ALLOW_CROSS_SITE: env.ADMIN_ALLOW_CROSS_SITE}' > .deploy-auth-secrets.json
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
@@ -142,21 +131,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
-          command: deploy --keep-vars --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
-
-      - name: Sync admin auth Worker secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          WORKER_NAME: ${{ vars.WORKER_NAME || 'your-worker-name' }}
-          WORKER_URL: ${{ secrets.WORKER_URL || secrets.NEXT_PUBLIC_API_URL }}
-          ADMIN_ORIGIN: ${{ secrets.ADMIN_ORIGIN }}
-          ADMIN_ALLOW_CROSS_SITE: ${{ secrets.ADMIN_ALLOW_CROSS_SITE }}
-        run: |
-          test -n "$WORKER_URL"
-          test -n "$ADMIN_ORIGIN"
-          test -n "$ADMIN_ALLOW_CROSS_SITE"
-          cd apps/worker
-          printf '%s' "$WORKER_URL" | npx wrangler secret put WORKER_URL --name "$WORKER_NAME"
-          printf '%s' "$ADMIN_ORIGIN" | npx wrangler secret put ADMIN_ORIGIN --name "$WORKER_NAME"
-          printf '%s' "$ADMIN_ALLOW_CROSS_SITE" | npx wrangler secret put ADMIN_ALLOW_CROSS_SITE --name "$WORKER_NAME"
+          command: deploy --keep-vars --secrets-file .deploy-auth-secrets.json --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
