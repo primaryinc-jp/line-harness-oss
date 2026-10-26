@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: "22.23.4"
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -117,6 +117,12 @@ jobs:
             -e "s|\"database_name\":\"[^\"]*\"|\"database_name\":\"${D1_DATABASE_NAME}\"|g" \
             -e "s|\"database_id\":\"[^\"]*\"|\"database_id\":\"${D1_DATABASE_ID}\"|g" \
             dist/line_harness/wrangler.json
+          # Preserve the live deployment settings instead of uploading the
+          # development placeholders from wrangler.toml. --keep-vars retains
+          # variables not explicitly overridden by the CORS settings below.
+          tmp="$(mktemp)"
+          jq '.vars = {}' dist/line_harness/wrangler.json > "$tmp"
+          mv "$tmp" dist/line_harness/wrangler.json
           # Inject admin CORS vars into the deployed config when ADMIN_ORIGIN is
           # set. ADMIN_ALLOW_CROSS_SITE defaults to "true" (SameSite=None; Secure
           # cookies) since cross-origin admin/API is the case that needs it.
@@ -136,7 +142,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
-          command: deploy --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
+          command: deploy --keep-vars --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
 
       - name: Sync admin auth Worker secrets
         env:

@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from 'vitest';
+import { describe, expect, test, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -358,6 +358,8 @@ describe('trackConversion + attribution integration', () => {
   let db: D1Database;
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
     sqlite = setupDb();
     db = asD1(sqlite);
     sqlite
@@ -366,6 +368,11 @@ describe('trackConversion + attribution integration', () => {
          VALUES ('cp-1', 'Purchase', 'purchase', 1000, '2024-01-01T00:00:00.000+09:00')`,
       )
       .run();
+  });
+
+  afterEach(() => {
+    sqlite.close();
+    vi.useRealTimers();
   });
 
   test('trackConversion stamps affiliate_id + attributed_ref_code from last-touch', async () => {
